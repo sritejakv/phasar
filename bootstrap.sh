@@ -58,7 +58,7 @@ set -- "${POSITIONAL[@]}" # restore positional parameters
 
 echo "installing phasar dependencies..."
 if [ -x "$(command -v pacman)" ]; then
-    yes | sudo pacman -Syu which zlib sqlite3 ncurses make python3 doxygen libxml2 swig gcc cmake z3 libedit graphviz python-sphinx openmp curl python-pip
+    yes | sudo pacman -Syu --needed which zlib sqlite3 ncurses make python3 doxygen libxml2 swig gcc cmake z3 libedit graphviz python-sphinx openmp curl python-pip
     ./utils/installBuildEAR.sh
 else
     ./utils/InstallAptDependencies.sh
@@ -74,7 +74,7 @@ else
 
 	if [ -z $BOOST_VERSION ] ;then
         if [ -x "$(command -v pacman)" ]; then
-            yes | sudo pacman -S boost-libs boost
+            yes | sudo pacman -Syu --needed boost-libs boost
         else
             if [ -z $DESIRED_BOOST_VERSION ] ;then
                 sudo apt install libboost-all-dev -y
@@ -131,7 +131,7 @@ export CXX=${LLVM_INSTALL_DIR}/bin/clang++
 mkdir -p ${PHASAR_DIR}/build
 cd ${PHASAR_DIR}/build
 cmake -G Ninja -DCMAKE_BUILD_TYPE=Release ${BOOST_PARAMS} -DPHASAR_BUILD_UNITTESTS=${DO_UNIT_TEST} ${PHASAR_DIR}
-cmake --build . -j${NUM_THREADS}
+cmake --build .
 
 if ${DO_UNIT_TEST}; then
    echo "Running PhASAR unit tests..."
@@ -148,3 +148,7 @@ sudo cmake -DCMAKE_INSTALL_PREFIX=${PHASAR_INSTALL_DIR} -P cmake_install.cmake
 sudo ldconfig
 cd ..
 echo "phasar successfully installed to ${PHASAR_INSTALL_DIR}"
+
+
+echo "Set environment variables"
+./utils/setEnvironmentVariables.sh ${LLVM_INSTALL_DIR} ${PHASAR_INSTALL_DIR}

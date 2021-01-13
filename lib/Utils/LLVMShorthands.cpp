@@ -15,9 +15,11 @@
  */
 
 #include <cstdlib>
+#include <llvm/IR/Instruction.h>
 
 #include "boost/algorithm/string/trim.hpp"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
@@ -26,6 +28,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -66,8 +69,38 @@ bool isAllocaInstOrHeapAllocaFunction(const llvm::Value *V) noexcept {
   return false;
 }
 
-bool matchesSignature(const llvm::Function *F,
-                      const llvm::FunctionType *FType) {
+// For C-style polymorphism we need to check whether a callee candidate would
+// be able to sanely access the formal argument.
+bool isTypeMatchForFunctionArgument(llvm::Type *Actual, llvm::Type *Formal) {
+  // First check for trivial type equality
+  if (Actual == Formal) {
+    return true;
+  }
+  // Trivial non-equality, e.g. PointerType and IntegerType
+  if (Actual->getTypeID() != Formal->getTypeID()) {
+    return false;
+  }
+  // For PointerType delegate into its element type
+  if (llvm::isa<llvm::PointerType>(Actual)) {
+    // If formal argument is void *, we can pass anything.
+    if (Formal->getPointerElementType()->isIntegerTy(8)) {
+      return true;
+    }
+    return isTypeMatchForFunctionArgument(Actual->getPointerElementType(),
+                                          Formal->getPointerElementType());
+  }
+  // For structs, Formal needs to be somehow contained in Actual.
+  if (llvm::isa<llvm::StructType>(Actual)) {
+    // Well, we could do sanity checks here, but if the analysed code is insane
+    // we would miss callees, so we don't do that.
+    return true;
+  }
+  // Sound fallback if we didn't match until here.
+  return false;
+}
+
+bool matchesSignature(const llvm::Function *F, const llvm::FunctionType *FType,
+                      bool ExactMatch) {
   // FType->print(llvm::outs());
   if (F == nullptr || FType == nullptr) {
     return false;
@@ -76,7 +109,11 @@ bool matchesSignature(const llvm::Function *F,
       F->getReturnType() == FType->getReturnType()) {
     unsigned Idx = 0;
     for (const auto &Arg : F->args()) {
-      if (Arg.getType() != FType->getParamType(Idx)) {
+      bool TypeMissMatch =
+          ExactMatch ? Arg.getType() != FType->getParamType(Idx)
+                     : !isTypeMatchForFunctionArgument(FType->getParamType(Idx),
+                                                       Arg.getType());
+      if (TypeMissMatch) {
         return false;
       }
       ++Idx;
@@ -103,14 +140,24 @@ bool matchesSignature(const llvm::FunctionType *FType1,
   return false;
 }
 
+static llvm::ModuleSlotTracker &getModuleSlotTrackerFor(const llvm::Value *V) {
+  static llvm::SmallDenseMap<const llvm::Module *,
+                             std::unique_ptr<llvm::ModuleSlotTracker>, 2>
+      ModuleToSlotTracker;
+  const auto *M = getModuleFromVal(V);
+
+  auto &ret = ModuleToSlotTracker[M];
+  if (!ret) {
+    ret = std::make_unique<llvm::ModuleSlotTracker>(M);
+  }
+
+  return *ret;
+}
+
 std::string llvmIRToString(const llvm::Value *V) {
-  // WARNING: Expensive function, cause is the V->print(RSO)
-  //         (20ms on a medium size code (phasar without debug)
-  //          80ms on a huge size code (clang without debug),
-  //          can be multiplied by times 3 to 5 if passes are enabled)
   std::string IRBuffer;
   llvm::raw_string_ostream RSO(IRBuffer);
-  V->print(RSO);
+  V->print(RSO, getModuleSlotTrackerFor(V));
   RSO << " | ID: " << getMetaDataID(V);
   RSO.flush();
   boost::trim_left(IRBuffer);
@@ -118,23 +165,18 @@ std::string llvmIRToString(const llvm::Value *V) {
 }
 
 std::string llvmIRToShortString(const llvm::Value *V) {
-  // WARNING: Expensive function, cause is the V->print(RSO)
-  //         (20ms on a medium size code (phasar without debug)
-  //          80ms on a huge size code (clang without debug),
-  //          can be multiplied by times 3 to 5 if passes are enabled)
   std::string IRBuffer;
   llvm::raw_string_ostream RSO(IRBuffer);
-  V->print(RSO);
-  boost::trim_left(IRBuffer);
-  RSO.flush();
-  if (IRBuffer.find(", align") != std::string::npos) {
-    IRBuffer.erase(IRBuffer.find(", align"));
-  } else if (IRBuffer.find(", !") != std::string::npos) {
-    IRBuffer.erase(IRBuffer.find(", !"));
-  } else if (IRBuffer.size() > 30) {
-    IRBuffer.erase(30);
+  if (const auto *I = llvm::dyn_cast<llvm::Instruction>(V);
+      I && !I->getType()->isVoidTy()) {
+    V->printAsOperand(RSO, true, getModuleSlotTrackerFor(V));
+  } else {
+    V->print(RSO, getModuleSlotTrackerFor(V));
   }
-  return IRBuffer + " | ID: " + getMetaDataID(V);
+  RSO << " | ID: " << getMetaDataID(V);
+  RSO.flush();
+  boost::trim_left(IRBuffer);
+  return IRBuffer;
 }
 
 std::vector<const llvm::Value *>

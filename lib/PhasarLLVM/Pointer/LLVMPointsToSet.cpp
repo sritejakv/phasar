@@ -38,12 +38,12 @@ namespace psr {
 LLVMPointsToSet::LLVMPointsToSet(ProjectIRDB &IRDB, bool UseLazyEvaluation,
                                  PointerAnalysisType PATy)
     : PTA(IRDB, UseLazyEvaluation, PATy) {
-  if (!UseLazyEvaluation) {
-    for (llvm::Module *M : IRDB.getAllModules()) {
-      // compute points-to information for all globals
-      for (const auto &G : M->globals()) {
-        computeValuesPointsToSet(&G);
-      }
+  for (llvm::Module *M : IRDB.getAllModules()) {
+    // compute points-to information for all globals
+    for (const auto &G : M->globals()) {
+      computeValuesPointsToSet(&G);
+    }
+    if (!UseLazyEvaluation) {
       // compute points-to information for all functions
       for (auto &F : *M) {
         if (!F.isDeclaration()) {
@@ -68,23 +68,28 @@ void LLVMPointsToSet::computeValuesPointsToSet(const llvm::Value *V) {
     // A global object may be used in multiple functions.
     for (const auto *User : G->users()) {
       if (const auto *Inst = llvm::dyn_cast<llvm::Instruction>(User)) {
-        computeFunctionsPointsToSet(
-            const_cast<llvm::Function *>(Inst->getFunction()));
-        if (isInterestingPointer(User)) {
-          mergePointsToSets(User, G);
-        } else if (const auto *Store = llvm::dyn_cast<llvm::StoreInst>(User)) {
-          if (isInterestingPointer(Store->getValueOperand())) {
-            // Store->getPointerOperand() doesn't require checking: it is
-            // always an interesting pointer
-            mergePointsToSets(Store->getValueOperand(),
-                              Store->getPointerOperand());
+        // The may be no corresponding function when the instruction is used in
+        // a vtable, for instance.
+        if (Inst->getParent()) {
+          computeFunctionsPointsToSet(
+              const_cast<llvm::Function *>(Inst->getFunction()));
+          if (isInterestingPointer(User)) {
+            mergePointsToSets(User, G);
+          } else if (const auto *Store =
+                         llvm::dyn_cast<llvm::StoreInst>(User)) {
+            if (isInterestingPointer(Store->getValueOperand())) {
+              // Store->getPointerOperand() doesn't require checking: it is
+              // always an interesting pointer
+              mergePointsToSets(Store->getValueOperand(),
+                                Store->getPointerOperand());
+            }
           }
         }
       }
     }
   } else {
-    auto *VF = retrieveFunction(V);
-    computeFunctionsPointsToSet(VF);
+    const auto *VF = retrieveFunction(V);
+    computeFunctionsPointsToSet(const_cast<llvm::Function *>(VF));
   }
 }
 
@@ -264,26 +269,61 @@ LLVMPointsToSet::getPointsToSet(const llvm::Value *V,
   return PointsToSets[V];
 }
 
-std::unordered_set<const llvm::Value *>
+std::shared_ptr<std::unordered_set<const llvm::Value *>>
 LLVMPointsToSet::getReachableAllocationSites(const llvm::Value *V,
+                                             bool IntraProcOnly,
                                              const llvm::Instruction *I) {
   // if V is not a (interesting) pointer we can return an empty set
   if (!isInterestingPointer(V)) {
-    return std::unordered_set<const llvm::Value *>();
+    return std::make_shared<std::unordered_set<const llvm::Value *>>();
   }
   computeValuesPointsToSet(V);
-  std::unordered_set<const llvm::Value *> AllocSites;
+  auto AllocSites = std::make_shared<std::unordered_set<const llvm::Value *>>();
   const auto PTS = PointsToSets[V];
-  for (const auto *P : *PTS) {
-    if (const auto *Alloca = llvm::dyn_cast<llvm::AllocaInst>(P)) {
-      AllocSites.insert(Alloca);
+  // consider the full inter-procedural points-to/alias information
+  if (!IntraProcOnly) {
+    for (const auto *P : *PTS) {
+      if (const auto *Alloca = llvm::dyn_cast<llvm::AllocaInst>(P)) {
+        AllocSites->insert(Alloca);
+      }
+      if (llvm::isa<llvm::CallInst>(P) || llvm::isa<llvm::InvokeInst>(P)) {
+        llvm::ImmutableCallSite CS(P);
+        if (CS.getCalledFunction() != nullptr &&
+            CS.getCalledFunction()->hasName() &&
+            HeapAllocatingFunctions.count(CS.getCalledFunction()->getName())) {
+          AllocSites->insert(P);
+        }
+      }
     }
-    if (llvm::isa<llvm::CallInst>(P) || llvm::isa<llvm::InvokeInst>(P)) {
-      llvm::ImmutableCallSite CS(P);
-      if (CS.getCalledFunction() != nullptr &&
-          CS.getCalledFunction()->hasName() &&
-          HeapAllocatingFunctions.count(CS.getCalledFunction()->getName())) {
-        AllocSites.insert(P);
+  } else {
+    // consider the function-local, i.e. intra-procedural, points-to/alias
+    // information only
+    const auto *VFun = retrieveFunction(V);
+    const auto *VG = llvm::dyn_cast<llvm::GlobalObject>(V);
+    // VFun and VG are mutally exclusive
+    assert(VFun != VG && "VFun and VG must be mutally exclusive!");
+    for (const auto *P : *PTS) {
+      if (const auto *Alloca = llvm::dyn_cast<llvm::AllocaInst>(P)) {
+        // only add function local allocation sites
+        if (VFun && VFun == Alloca->getFunction()) {
+          AllocSites->insert(Alloca);
+        }
+        if (VG) {
+          AllocSites->insert(Alloca);
+        }
+      }
+      if (llvm::isa<llvm::CallInst>(P) || llvm::isa<llvm::InvokeInst>(P)) {
+        llvm::ImmutableCallSite CS(P);
+        if (CS.getCalledFunction() != nullptr &&
+            CS.getCalledFunction()->hasName() &&
+            HeapAllocatingFunctions.count(CS.getCalledFunction()->getName())) {
+          if (VFun && VFun == CS.getInstruction()->getFunction()) {
+            AllocSites->insert(P);
+          }
+          if (VG) {
+            AllocSites->insert(P);
+          }
+        }
       }
     }
   }

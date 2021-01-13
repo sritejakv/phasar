@@ -92,6 +92,10 @@ else()
   message(STATUS "Dynamic log disabled")
 endif()
 
+configure_file(config.h.in config.h @ONLY)
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
+
+
 include_directories(
   ${PHASAR_SRC_DIR}/include
 )
@@ -140,7 +144,7 @@ endif()
 add_definitions(${LLVM_DEFINITIONS})
 
 if (NOT PHASAR_IN_TREE)
-  find_library(LLVM_LIBRARY NAMES LLVM HINTS ${LLVM_LIBRARY_DIRS})
+  find_library(LLVM_LIBRARY NAMES LLVM PATHS ${LLVM_LIBRARY_DIRS} NO_DEFAULT_PATH)
   if(NOT ${LLVM_LIBRARY} STREQUAL "LLVM_LIBRARY-NOTFOUND")
     message(STATUS "Found consolidated shared LLVM lib " ${LLVM_LIBRARY} " that will be linked against.")
     set(USE_LLVM_FAT_LIB on)
@@ -206,6 +210,7 @@ add_subdirectory(lib)
 set(LLVM_LINK_COMPONENTS
   coverage
   coroutines
+  demangle
   libdriver
   lto
   support
