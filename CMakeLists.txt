@@ -5,10 +5,10 @@ if (DEFINED LLVM_MAIN_SRC_DIR)
   set(PHASAR_IN_TREE 1)
 endif()
 
-if (NOT PHASAR_IN_TREE)
-  project (phasar)
-  set(CMAKE_PROJECT_NAME "phasar")
-endif ()
+# if (NOT PHASAR_IN_TREE)
+#   project (phasar)
+#   set(CMAKE_PROJECT_NAME "phasar")
+# endif ()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS YES)
 set(CMAKE_CXX_STANDARD 17)
@@ -51,11 +51,11 @@ list(GET VERSION_NUMBER_FILE 2 VERSION_NUMBER_PHASAR)
 
 include("phasar_macros")
 
-option(PHASAR_BUILD_UNITTESTS "Build all tests (default is ON)" ON)
+option(PHASAR_BUILD_UNITTESTS "Build all tests (default is ON)" OFF)
 
 option(PHASAR_BUILD_OPENSSL_TS_UNITTESTS "Build OPENSSL typestate tests (require OpenSSL, default is OFF)" OFF)
 
-option(PHASAR_BUILD_IR "Build IR test code (default is ON)" ON)
+option(PHASAR_BUILD_IR "Build IR test code (default is ON)" OFF)
 
 option(PHASAR_ENABLE_CLANG_TIDY_DURING_BUILD "Run clang-tidy during build (default is OFF)" OFF)
 
