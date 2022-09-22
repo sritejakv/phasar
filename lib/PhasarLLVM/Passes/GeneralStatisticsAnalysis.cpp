@@ -177,7 +177,7 @@ GeneralStatisticsAnalysis::run(llvm::Module &M,
         llvm::raw_string_ostream Rso(TypeStr);
         Type->print(Rso);
         PHASAR_LOG_LEVEL(INFO, "  " << Rso.str());
-      })
+      });
   // now we are done and can return the results
   return Stats;
 }
@@ -214,6 +214,16 @@ GeneralStatistics::getAllocaInstructions() const {
 set<const llvm::Instruction *>
 GeneralStatistics::getRetResInstructions() const {
   return RetResInstructions;
+}
+
+nlohmann::json GeneralStatistics::getAsJson() const {
+  nlohmann::json J;
+  J["Instructions"] = getInstructions();
+  J["Functions"] = Functions;
+  J["Alloca Instructions"] = AllocaInstructions.size();
+  J["Call Sites"] = CallSites;
+  J["Global Variables"] = Globals;
+  return J;
 }
 
 } // namespace psr
