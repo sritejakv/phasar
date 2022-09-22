@@ -193,8 +193,17 @@ LLVMBasedICFG::LLVMBasedICFG(ProjectIRDB &IRDB, CallGraphAnalysisType CGType,
       processFunction(F, *Res, FixpointReached);
     }
 
-    for (auto [CS, _] : IndirectCalls) {
-      FixpointReached &= !constructDynamicCall(CS, *Res);
+    if (S != Soundness::Unsound) {
+      for (auto [CS, _] : IndirectCalls) {
+        FixpointReached &= !constructDynamicCall(CS, *Res);
+      }
+    } else {
+      for (auto &CS : UnsoundIndirectCalls) {
+        FixpointReached &= !constructDynamicCall(CS, *Res);
+      }
+      UnsoundCallSites.insert(UnsoundIndirectCalls.begin(),
+                              UnsoundIndirectCalls.end());
+      UnsoundIndirectCalls.clear();
     }
 
   } while (!FixpointReached);
@@ -269,7 +278,12 @@ void LLVMBasedICFG::processFunction(const llvm::Function *F, Resolver &Resolver,
                                       << "  " << llvmIRToString(CS));
           IndirectCalls[CS] = 0;
 
-          FixpointReached = false;
+          if (S != Soundness::Unsound) {
+            FixpointReached = false;
+          } else {
+            UnsoundIndirectCalls.push_back(CS);
+          }
+
           continue;
         }
       }

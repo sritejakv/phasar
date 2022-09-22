@@ -89,6 +89,8 @@ private:
   // Map indirect calls to the number of possible targets found for it. Fixpoint
   // is not reached when more targets are found.
   llvm::DenseMap<const llvm::Instruction *, unsigned> IndirectCalls;
+  llvm::DenseSet<const llvm::Instruction *> UnsoundCallSites;
+  std::vector<const llvm::Instruction *> UnsoundIndirectCalls;
   // The VertexProperties for our call-graph.
   struct VertexProperties {
     const llvm::Function *F = nullptr;
@@ -308,6 +310,14 @@ public:
   /// enriched with source-code information on every edge and ignoring debug
   /// instructions
   [[nodiscard]] nlohmann::json exportICFGAsSourceCodeJson() const;
+
+  [[nodiscard]] inline auto getUnsoundCallSites() {
+    return llvm::make_range(UnsoundCallSites.begin(), UnsoundCallSites.end());
+  }
+
+  [[nodiscard]] inline size_t getNumUnsoundCallSites() const noexcept {
+    return UnsoundCallSites.size();
+  }
 
   [[nodiscard]] unsigned getNumOfVertices() const;
 
