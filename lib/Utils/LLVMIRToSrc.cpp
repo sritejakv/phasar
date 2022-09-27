@@ -195,6 +195,27 @@ unsigned int getLineFromIR(const llvm::Value *V) {
   return 0;
 }
 
+llvm::APInt getInstructionHash(const llvm::Value *Val) {
+  if (const auto *Inst = llvm::dyn_cast<llvm::Instruction>(Val)) {
+    if (auto *Metadata = Inst->getMetadata("inst.hash")) {
+      return llvm::cast<llvm::ConstantInt>(
+                 llvm::cast<llvm::ValueAsMetadata>(Metadata->getOperand(0))
+                     ->getValue())
+          ->getValue();
+    }
+  } else if (const auto *GlobalVar =
+                 llvm::dyn_cast<llvm::GlobalVariable>(Val)) {
+    if (auto *Metadata = GlobalVar->getMetadata("inst.hash")) {
+      return llvm::cast<llvm::ConstantInt>(
+                 llvm::cast<llvm::ValueAsMetadata>(Metadata->getOperand(0))
+                     ->getValue())
+          ->getValue();
+    }
+  }
+
+  return llvm::APInt(64, -1);
+}
+
 std::string getDirectoryFromIR(const llvm::Value *V) {
   // Argument and Instruction
   if (auto *DILoc = getDILocation(V)) {
@@ -287,6 +308,9 @@ void from_json(const nlohmann::json &J, SourceCodeInfo &Info) {
   if (auto Fn = J.find("sourceCode"); Fn != J.end()) {
     Fn->get_to(Info.SourceCodeFunctionName);
   }
+  if (auto IHash = J.find("instructionHash"); IHash != J.end()) {
+    IHash->get_to(Info.InstructionHash);
+  }
   J.at("line").get_to(Info.Line);
   J.at("column").get_to(Info.Column);
 }
@@ -295,6 +319,7 @@ void to_json(nlohmann::json &J, const SourceCodeInfo &Info) {
       {"sourceCodeLine", Info.SourceCodeLine},
       {"sourceCodeFileName", Info.SourceCodeFilename},
       {"sourceCodeFunctionName", Info.SourceCodeFunctionName},
+      {"instructionHash", Info.InstructionHash},
       {"line", Info.Line},
       {"column", Info.Column},
   };
@@ -305,6 +330,7 @@ SourceCodeInfo getSrcCodeInfoFromIR(const llvm::Value *V) {
       getSrcCodeFromIR(V),
       getFilePathFromIR(V),
       llvm::demangle(getFunctionNameFromIR(V)),
+      getInstructionHash(V).getSExtValue(),
       getLineFromIR(V),
       getColumnFromIR(V),
   };

@@ -19,6 +19,8 @@
 
 #include <string>
 
+#include "llvm/ADT/APInt.h"
+
 #include "nlohmann/json.hpp"
 
 // Forward declaration of types for which we only use its pointer or ref type
@@ -41,6 +43,8 @@ std::string getFilePathFromIR(const llvm::Value *V);
 
 std::string getDirectoryFromIR(const llvm::Value *V);
 
+llvm::APInt getInstructionHash(const llvm::Value *val);
+
 unsigned int getLineFromIR(const llvm::Value *V);
 
 unsigned int getColumnFromIR(const llvm::Value *V);
@@ -53,6 +57,7 @@ struct SourceCodeInfo {
   std::string SourceCodeLine;
   std::string SourceCodeFilename;
   std::string SourceCodeFunctionName;
+  long long InstructionHash = 0;
   unsigned Line = 0;
   unsigned Column = 0;
 
