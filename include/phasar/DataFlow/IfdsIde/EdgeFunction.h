@@ -7,8 +7,8 @@
  *     Fabian Schiebel and others
  *****************************************************************************/
 
-#ifndef PHASAR_PHASARLLVM_DATAFLOWSOLVER_IFDSIDE_EDGEFUNCTION_H
-#define PHASAR_PHASARLLVM_DATAFLOWSOLVER_IFDSIDE_EDGEFUNCTION_H
+#ifndef PHASAR_DATAFLOW_IFDSIDE_EDGEFUNCTION_H
+#define PHASAR_DATAFLOW_IFDSIDE_EDGEFUNCTION_H
 
 #include "phasar/DataFlow/IfdsIde/EdgeFunctionSingletonCache.h"
 #include "phasar/Utils/ByRef.h"
@@ -58,8 +58,8 @@ template <typename T>
 concept IsEdgeFunction = requires(const T &EF, const EdgeFunction<typename T::l_t>& TEEF, EdgeFunctionRef<T> CEF, typename T::l_t Src) {
   typename T::l_t;
   {EF.computeTarget(Src)}   -> std::convertible_to<typename T::l_t>;
-  {T::compose(CEF, TEEF)}  -> std::convertible_to<EdgeFunction<typename T::l_t>>;
-  {T::join(CEF, TEEF)}     -> std::convertible_to<EdgeFunction<typename T::l_t>>;
+  {T::compose(CEF, TEEF)}  -> std::same_as<EdgeFunction<typename T::l_t>>;
+  {T::join(CEF, TEEF)}     -> std::same_as<EdgeFunction<typename T::l_t>>;
 };
   // clang-format on
 
@@ -222,10 +222,8 @@ public:
 
   /// Implicit-conversion constructor from EdgeFunctionRef. Increments the
   /// ref-count if not small-object optimized
-  template <typename ConcreteEF,
-            typename = std::enable_if_t<
-                !std::is_same_v<EdgeFunction, std::decay_t<ConcreteEF>> &&
-                IsEdgeFunction<ConcreteEF>>>
+  template <typename ConcreteEF, typename = std::enable_if_t<!std::is_same_v<
+                                     EdgeFunction, std::decay_t<ConcreteEF>>>>
   EdgeFunction(EdgeFunctionRef<ConcreteEF> CEF) noexcept
       : EdgeFunction(CEF.Instance,
                      {&VTableFor<ConcreteEF>, [CEF] {
@@ -265,7 +263,7 @@ public:
       : EdgeFunction(
             [](auto &&...Args) {
               if constexpr (IsSOOCandidate<std::decay_t<ConcreteEF>>) {
-                void *Ret;
+                void *Ret = nullptr;
                 new (&Ret) ConcreteEF(std::forward<ArgTys>(Args)...);
                 return Ret;
               } else {
@@ -302,7 +300,7 @@ public:
                 new (&Ret) ConcreteEF(std::move(EF.EF));
                 return Ret;
               } else {
-                if (auto Mem = EF.Cache->lookup(EF.EF)) {
+                if (const auto *Mem = EF.Cache->lookup(EF.EF)) {
                   return static_cast<const RefCounted<ConcreteEF> *>(Mem);
                 }
 
@@ -806,4 +804,4 @@ struct CastInfo<To, const psr::EdgeFunction<L>>
 #endif
 } // namespace llvm
 
-#endif // PHASAR_PHASARLLVM_DATAFLOWSOLVER_IFDSIDE_EDGEFUNCTION_H
+#endif // PHASAR_DATAFLOW_IFDSIDE_EDGEFUNCTION_H
