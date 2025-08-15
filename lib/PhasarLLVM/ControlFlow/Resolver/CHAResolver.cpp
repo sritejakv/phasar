@@ -16,6 +16,7 @@
 
 #include "phasar/PhasarLLVM/ControlFlow/Resolver/CHAResolver.h"
 
+#include "phasar/PhasarLLVM/TypeHierarchy/DIBasedTypeHierarchy.h"
 #include "phasar/PhasarLLVM/TypeHierarchy/LLVMTypeHierarchy.h"
 #include "phasar/PhasarLLVM/Utils/LLVMShorthands.h"
 #include "phasar/Utils/Logger.h"
@@ -26,14 +27,24 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Module.h"
 
+#include <memory>
+
 using namespace std;
 using namespace psr;
 
-CHAResolver::CHAResolver(LLVMProjectIRDB &IRDB, LLVMTypeHierarchy &TH)
-    : Resolver(IRDB, TH) {}
+CHAResolver::CHAResolver(const LLVMProjectIRDB *IRDB,
+                         const LLVMVFTableProvider *VTP,
+                         const DIBasedTypeHierarchy *TH)
+    : Resolver(IRDB, VTP), TH(TH) {
+  if (!TH) {
+    this->TH = std::make_unique<DIBasedTypeHierarchy>(*IRDB);
+  }
+}
 
-auto CHAResolver::resolveVirtualCall(const llvm::CallBase *CallSite)
-    -> FunctionSetTy {
+CHAResolver::~CHAResolver() = default;
+
+void CHAResolver::resolveVirtualCall(FunctionSetTy &PossibleTargets,
+                                     const llvm::CallBase *CallSite) {
   PHASAR_LOG_LEVEL(DEBUG, "Call virtual function: ");
   // Leading to SEGFAULT in Unittests. Error only when run in Debug mode
   // << llvmIRToString(CallSite));
@@ -48,7 +59,7 @@ auto CHAResolver::resolveVirtualCall(const llvm::CallBase *CallSite)
                          // run in Debug mode
                          // << llvmIRToString(CallSite)
                          << "\n");
-    return {};
+    return;
   }
 
   auto VtableIndex = RetrievedVtableIndex.value();
@@ -58,18 +69,15 @@ auto CHAResolver::resolveVirtualCall(const llvm::CallBase *CallSite)
   const auto *ReceiverTy = getReceiverType(CallSite);
 
   // also insert all possible subtypes vtable entries
-  auto FallbackTys = Resolver::TH->getSubTypes(ReceiverTy);
-
-  FunctionSetTy PossibleCallees;
+  auto FallbackTys = TH->getSubTypes(ReceiverTy);
 
   for (const auto &FallbackTy : FallbackTys) {
-    const auto *Target =
-        getNonPureVirtualVFTEntry(FallbackTy, VtableIndex, CallSite);
-    if (Target) {
-      PossibleCallees.insert(Target);
+    const auto *Target = getNonPureVirtualVFTEntry(FallbackTy, VtableIndex,
+                                                   CallSite, ReceiverTy);
+    if (Target && psr::isConsistentCall(CallSite, Target)) {
+      PossibleTargets.insert(Target);
     }
   }
-  return PossibleCallees;
 }
 
 std::string CHAResolver::str() const { return "CHA"; }

@@ -13,6 +13,7 @@
 #include "phasar/DataFlow/IfdsIde/EdgeFunction.h"
 #include "phasar/Utils/ByRef.h"
 #include "phasar/Utils/JoinLattice.h"
+#include "phasar/Utils/TypeTraits.h"
 
 #include "llvm/ADT/ArrayRef.h"
 
@@ -39,13 +40,67 @@ template <typename L> struct EdgeIdentity final {
        const EdgeFunction<l_t> &OtherFunction);
 };
 
+template <typename L> struct ConstantEdgeFunction {
+  using l_t = L;
+  using JLattice = JoinLatticeTraits<L>;
+  using value_type = typename NonTopBotValue<l_t>::type;
+
+  [[nodiscard]] l_t computeTarget(ByConstRef<l_t> /*Source*/) const
+      noexcept(std::is_nothrow_constructible_v<l_t, const value_type &>) {
+    static_assert(IsEdgeFunction<ConstantEdgeFunction>);
+    return Value;
+  }
+
+  template <typename ConcreteEF, typename = std::enable_if_t<std::is_base_of_v<
+                                     ConstantEdgeFunction, ConcreteEF>>>
+  [[nodiscard]] static EdgeFunction<l_t>
+  compose(EdgeFunctionRef<ConcreteEF> This,
+          const EdgeFunction<l_t> &SecondFunction);
+
+  template <typename ConcreteEF, typename = std::enable_if_t<std::is_base_of_v<
+                                     ConstantEdgeFunction, ConcreteEF>>>
+  [[nodiscard]] static EdgeFunction<l_t>
+  join(EdgeFunctionRef<ConcreteEF> This,
+       const EdgeFunction<l_t> &OtherFunction);
+
+  [[nodiscard]] constexpr bool isConstant() const noexcept { return true; }
+
+  // -- constant data member
+
+  value_type Value{};
+};
+
+template <typename L, typename = std::enable_if_t<
+                          CanEfficientlyPassByValue<ConstantEdgeFunction<L>>>>
+[[nodiscard]] bool operator==(ConstantEdgeFunction<L> LHS,
+                              ConstantEdgeFunction<L> RHS) noexcept {
+  return LHS.Value == RHS.Value;
+}
+
+template <typename L, typename = std::enable_if_t<
+                          !CanEfficientlyPassByValue<ConstantEdgeFunction<L>>>>
+[[nodiscard]] bool operator==(const ConstantEdgeFunction<L> &LHS,
+                              const ConstantEdgeFunction<L> &RHS) noexcept {
+  return LHS.Value == RHS.Value;
+}
+
+template <typename L>
+[[nodiscard]] llvm::raw_ostream &
+operator<<(llvm::raw_ostream &OS, ByConstRef<ConstantEdgeFunction<L>> Id) {
+  OS << "ConstantEF";
+  if constexpr (is_llvm_printable_v<
+                    typename ConstantEdgeFunction<L>::value_type>) {
+    OS << '[' << Id.Value << ']';
+  }
+  return OS;
+}
+
 template <typename L> struct AllBottom final {
   using l_t = L;
   using JLattice = JoinLatticeTraits<L>;
 
   [[no_unique_address]] std::conditional_t<HasJoinLatticeTraits<l_t>, EmptyType,
-                                           l_t>
-      BottomValue;
+                                           l_t> BottomValue;
 
   [[nodiscard]] l_t computeTarget(ByConstRef<l_t> /*Source*/) const noexcept {
     static_assert(std::is_trivially_copyable_v<AllBottom>);
@@ -60,7 +115,25 @@ template <typename L> struct AllBottom final {
   [[nodiscard]] static EdgeFunction<l_t>
   compose(EdgeFunctionRef<AllBottom> This,
           const EdgeFunction<l_t> &SecondFunction) {
-    return SecondFunction.isConstant() ? SecondFunction : This;
+    if (SecondFunction.isConstant()) {
+      return SecondFunction;
+    }
+
+    if constexpr (HasJoinLatticeTraits<L>) {
+      auto ConstVal = SecondFunction.computeTarget(JLattice::bottom());
+      if (ConstVal == JLattice::bottom()) {
+        return This;
+      }
+
+      return ConstantEdgeFunction<L>{
+          NonTopBotValue<L>::unwrap(std::move(ConstVal))};
+    } else {
+      // Note: This used to be the default behavior, but it appears to be too
+      // restrictive
+      return This;
+    }
+
+    // return SecondFunction.isConstant() ? SecondFunction : This;
   }
 
   [[nodiscard]] static EdgeFunction<l_t>
@@ -84,8 +157,7 @@ template <typename L> struct AllTop final {
   using JLattice = JoinLatticeTraits<L>;
 
   [[no_unique_address]] std::conditional_t<HasJoinLatticeTraits<l_t>, EmptyType,
-                                           l_t>
-      TopValue;
+                                           l_t> TopValue;
 
   [[nodiscard]] l_t computeTarget(ByConstRef<l_t> /*Source*/) const noexcept {
     static_assert(std::is_trivially_copyable_v<AllTop>);
@@ -131,95 +203,21 @@ defaultComposeOrNull(EdgeFunctionRef<ConcreteEF> This,
   return nullptr;
 }
 
-template <typename L> struct ConstantEdgeFunction {
-  using l_t = L;
-  using JLattice = JoinLatticeTraits<L>;
-  using value_type = typename NonTopBotValue<l_t>::type;
-
-  [[nodiscard]] l_t computeTarget(ByConstRef<l_t> /*Source*/) const
-      noexcept(std::is_nothrow_constructible_v<l_t, const value_type &>) {
-    static_assert(IsEdgeFunction<ConstantEdgeFunction>);
-    return Value;
-  }
-
-  template <typename ConcreteEF, typename = std::enable_if_t<std::is_base_of_v<
-                                     ConstantEdgeFunction, ConcreteEF>>>
-  [[nodiscard]] static EdgeFunction<l_t>
-  compose(EdgeFunctionRef<ConcreteEF> This,
-          const EdgeFunction<l_t> &SecondFunction) {
-    if (auto Default = defaultComposeOrNull(This, SecondFunction)) {
-      return Default;
-    }
-
-    auto ConstVal = SecondFunction.computeTarget(This->Value);
-    if constexpr (!EdgeFunctionBase::IsSOOCandidate<ConstantEdgeFunction>) {
-      if (ConstVal == This->Value) {
-        return This;
-      }
-    }
-
-    if constexpr (AreEqualityComparable<decltype(JLattice::bottom()), l_t>) {
-      if (JLattice::bottom() == ConstVal) {
-        return AllBottom<l_t>{};
-      }
-    } else {
-      if (l_t(JLattice::bottom()) == ConstVal) {
-        return AllBottom<l_t>{};
-      }
-    }
-
-    if constexpr (AreEqualityComparable<decltype(JLattice::top()), l_t>) {
-      if (JLattice::top() == ConstVal) {
-        /// TODO: Can this ever happen?
-        return AllTop<l_t>{};
-      }
-    } else {
-      if (l_t(JLattice::top()) == ConstVal) {
-        /// TODO: Can this ever happen?
-        return AllTop<l_t>{};
-      }
-    }
-
-    return ConstantEdgeFunction{
-        NonTopBotValue<l_t>::unwrap(std::move(ConstVal))};
-  }
-
-  template <typename ConcreteEF, typename = std::enable_if_t<std::is_base_of_v<
-                                     ConstantEdgeFunction, ConcreteEF>>>
-  [[nodiscard]] static EdgeFunction<l_t>
-  join(EdgeFunctionRef<ConcreteEF> This,
-       const EdgeFunction<l_t> &OtherFunction);
-
-  [[nodiscard]] constexpr bool isConstant() const noexcept { return true; }
-
-  // -- constant data member
-
-  value_type Value{};
-};
-
-template <typename L, typename = std::enable_if_t<
-                          CanEfficientlyPassByValue<ConstantEdgeFunction<L>>>>
-[[nodiscard]] bool operator==(ConstantEdgeFunction<L> LHS,
-                              ConstantEdgeFunction<L> RHS) noexcept {
-  return LHS.Value == RHS.Value;
-}
-
-template <typename L, typename = std::enable_if_t<
-                          !CanEfficientlyPassByValue<ConstantEdgeFunction<L>>>>
-[[nodiscard]] bool operator==(const ConstantEdgeFunction<L> &LHS,
-                              const ConstantEdgeFunction<L> &RHS) noexcept {
-  return LHS.Value == RHS.Value;
-}
-
 template <typename L>
-[[nodiscard]] llvm::raw_ostream &
-operator<<(llvm::raw_ostream &OS, ByConstRef<ConstantEdgeFunction<L>> Id) {
-  OS << "ConstantEF";
-  if constexpr (is_llvm_printable_v<
-                    typename ConstantEdgeFunction<L>::value_type>) {
-    OS << '[' << Id.Value << ']';
+EdgeFunction<L>
+defaultComposeOrNull(const EdgeFunction<L> &This,
+                     const EdgeFunction<L> &SecondFunction) noexcept {
+  if (llvm::isa<EdgeIdentity<L>>(SecondFunction)) {
+    return This;
   }
-  return OS;
+  if (SecondFunction.isConstant() || llvm::isa<AllTop<L>>(This) ||
+      llvm::isa<EdgeIdentity<L>>(This)) {
+    return SecondFunction;
+  }
+  if (llvm::isa<AllBottom<L>>(This)) {
+    return This;
+  }
+  return nullptr;
 }
 
 template <typename L> struct EdgeFunctionComposer {
@@ -265,11 +263,17 @@ template <typename L> struct EdgeFunctionComposer {
     return LHS.First == RHS.First && LHS.Second == RHS.Second;
   }
 
+  [[nodiscard]] size_t depth() const noexcept {
+    return First.depth() + Second.depth();
+  }
+
   // -- data members
 
   EdgeFunction<l_t> First{};
   EdgeFunction<l_t> Second{};
 };
+
+static_assert(HasDepth<EdgeFunctionComposer<int>>);
 
 template <typename L, uint8_t N> struct JoinEdgeFunction {
   using l_t = L;
@@ -402,6 +406,26 @@ EdgeFunction<L> defaultJoinOrNull(EdgeFunctionRef<ConcreteEF> This,
   return nullptr;
 }
 
+template <typename L, uint8_t N = 0>
+EdgeFunction<L> defaultJoinOrNull(const EdgeFunction<L> &This,
+                                  const EdgeFunction<L> &OtherFunction) {
+  if (llvm::isa<AllBottom<L>>(OtherFunction) || llvm::isa<AllTop<L>>(This)) {
+    return OtherFunction;
+  }
+  if (llvm::isa<AllTop<L>>(OtherFunction) || OtherFunction == This ||
+      llvm::isa<AllBottom<L>>(This)) {
+    return This;
+  }
+  if (llvm::isa<EdgeIdentity<L>>(OtherFunction)) {
+    if constexpr (N > 0) {
+      return JoinEdgeFunction<L, N>::create(This, OtherFunction);
+    } else if constexpr (HasJoinLatticeTraits<L>) {
+      return AllBottom<L>{};
+    }
+  }
+  return nullptr;
+}
+
 template <typename L>
 EdgeFunction<L> EdgeIdentity<L>::join(EdgeFunctionRef<EdgeIdentity> This,
                                       const EdgeFunction<L> &OtherFunction) {
@@ -415,6 +439,47 @@ EdgeFunction<L> EdgeIdentity<L>::join(EdgeFunctionRef<EdgeIdentity> This,
 
   // do not know how to join; hence ask other function to decide on this
   return OtherFunction.joinWith(This);
+}
+
+template <typename L>
+template <typename ConcreteEF, typename>
+EdgeFunction<L>
+ConstantEdgeFunction<L>::compose(EdgeFunctionRef<ConcreteEF> This,
+                                 const EdgeFunction<L> &SecondFunction) {
+  if (auto Default = defaultComposeOrNull(This, SecondFunction)) {
+    return Default;
+  }
+
+  auto ConstVal = SecondFunction.computeTarget(This->Value);
+  if constexpr (!EdgeFunctionBase::IsSOOCandidate<ConstantEdgeFunction>) {
+    if (ConstVal == This->Value) {
+      return This;
+    }
+  }
+
+  if constexpr (AreEqualityComparable<decltype(JLattice::bottom()), L>) {
+    if (JLattice::bottom() == ConstVal) {
+      return AllBottom<L>{};
+    }
+  } else {
+    if (L(JLattice::bottom()) == ConstVal) {
+      return AllBottom<L>{};
+    }
+  }
+
+  if constexpr (AreEqualityComparable<decltype(JLattice::top()), L>) {
+    if (JLattice::top() == ConstVal) {
+      /// TODO: Can this ever happen?
+      return AllTop<L>{};
+    }
+  } else {
+    if (L(JLattice::top()) == ConstVal) {
+      /// TODO: Can this ever happen?
+      return AllTop<L>{};
+    }
+  }
+
+  return ConstantEdgeFunction{NonTopBotValue<L>::unwrap(std::move(ConstVal))};
 }
 
 template <typename L>

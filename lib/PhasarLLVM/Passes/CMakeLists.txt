@@ -4,11 +4,14 @@ add_phasar_library(phasar_passes
   ${PASSES_SRC}
 
   LINKS
-    phasar_utils
+    phasar_llvm_utils
 
   LLVM_LINK_COMPONENTS
     Core
     Support
     Analysis
     Demangle
+
+  MODULE_FILES
+    Passes.cppm
 )

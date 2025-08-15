@@ -24,6 +24,7 @@
 #include "phasar/Utils/Logger.h"
 #include "phasar/Utils/Utilities.h"
 
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/AbstractCallSite.h"
 #include "llvm/IR/Constants.h"
@@ -66,7 +67,20 @@ struct LCAEdgeFunctionComposer : EdgeFunctionComposer<l_t> {
   }
 };
 
-using GenConstant = ConstantEdgeFunction<l_t>;
+auto hash_value(const LCAEdgeFunctionComposer &EF) noexcept {
+  return llvm::hash_combine(EF.First, EF.Second);
+}
+
+static_assert(is_llvm_hashable_v<LCAEdgeFunctionComposer>);
+
+struct GenConstant : ConstantEdgeFunction<l_t> {};
+
+llvm::hash_code hash_value(const GenConstant &EF) noexcept {
+  return llvm::hash_value(EF.Value);
+}
+
+using TTT = decltype(hash_value(std::declval<GenConstant>()));
+static_assert(is_llvm_hashable_v<GenConstant>);
 
 /**
  * The following binary operations are computed:
@@ -220,7 +234,6 @@ struct BinOp {
     }
 
     // TODO: Optimize Binop::composeWith(BinOp)
-
     return LCAEdgeFunctionComposer{This, SecondFunction};
   }
 
@@ -253,6 +266,13 @@ struct BinOp {
     return OS;
   }
 };
+
+auto hash_value(const BinOp &EF) noexcept {
+  return llvm::hash_combine(EF.Op, EF.Lop, EF.Rop, EF.CurrNode);
+}
+
+static_assert(is_llvm_hashable_v<BinOp>);
+
 } // namespace lca
 
 IDELinearConstantAnalysis::IDELinearConstantAnalysis(
@@ -565,7 +585,7 @@ IDELinearConstantAnalysis::getSummaryEdgeFunction(n_t Curr, d_t CurrNode,
 }
 
 void IDELinearConstantAnalysis::emitTextReport(
-    const SolverResults<n_t, d_t, l_t> &SR, llvm::raw_ostream &OS) {
+    GenericSolverResults<n_t, d_t, l_t> SR, llvm::raw_ostream &OS) {
   OS << "\n====================== IDE-Linear-Constant-Analysis Report "
         "======================\n";
   if (!IRDB->debugInfoAvailable()) {
@@ -618,7 +638,8 @@ void IDELinearConstantAnalysis::stripBottomResults(
 }
 
 IDELinearConstantAnalysis::lca_results_t
-IDELinearConstantAnalysis::getLCAResults(SolverResults<n_t, d_t, l_t> SR) {
+IDELinearConstantAnalysis::getLCAResults(
+    GenericSolverResults<n_t, d_t, l_t> SR) {
   std::map<std::string, std::map<unsigned, LCAResult>> AggResults;
   llvm::outs() << "\n==== Computing LCA Results ====\n";
   for (const auto *F : ICF->getAllFunctions()) {

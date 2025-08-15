@@ -11,11 +11,13 @@
 #define PHASAR_PHASARLLVM_DATAFLOW_IFDSIDE_PROBLEMS_IDEINSTINTERACTIONANALYSIS_H
 
 #include "phasar/DataFlow/IfdsIde/DefaultEdgeFunctionSingletonCache.h"
+#include "phasar/DataFlow/IfdsIde/EdgeFunction.h"
 #include "phasar/DataFlow/IfdsIde/EdgeFunctionUtils.h"
 #include "phasar/DataFlow/IfdsIde/FlowFunctions.h"
 #include "phasar/DataFlow/IfdsIde/IDETabulationProblem.h"
 #include "phasar/DataFlow/IfdsIde/SolverResults.h"
 #include "phasar/Domain/LatticeDomain.h"
+#include "phasar/PhasarLLVM/ControlFlow/LLVMBasedICFG.h"
 #include "phasar/PhasarLLVM/DB/LLVMProjectIRDB.h"
 #include "phasar/PhasarLLVM/DataFlow/IfdsIde/LLVMFlowFunctions.h"
 #include "phasar/PhasarLLVM/DataFlow/IfdsIde/LLVMSolverResults.h"
@@ -28,8 +30,10 @@
 #include "phasar/Utils/BitVectorSet.h"
 #include "phasar/Utils/ByRef.h"
 #include "phasar/Utils/Logger.h"
+#include "phasar/Utils/Printer.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constant.h"
@@ -629,26 +633,19 @@ public:
       // variables using generalized initial seeds
 
       // Generate zero value at the entry points
-      Seeds.addSeed(SP, this->getZeroValue(), bottomElement());
+      Seeds.addSeed(SP, this->getZeroValue(), Bottom{});
       // Generate formal parameters of entry points, e.g. main(). Formal
       // parameters will otherwise cause trouble by overriding alloca
       // instructions without being valid data-flow facts themselves.
       for (const auto &Arg : SP->getFunction()->args()) {
-        Seeds.addSeed(SP, &Arg, Bottom{});
+        Seeds.addSeed(SP, &Arg, BitVectorSet<e_t>());
       }
       // Generate all global variables using generalized initial seeds
 
       for (const auto &G : this->IRDB->getModule()->globals()) {
         if (const auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(&G)) {
-          l_t InitialValues = BitVectorSet<e_t>();
-          std::set<e_t> EdgeFacts;
-          if (EdgeFactGen) {
-            EdgeFacts = EdgeFactGen(GV);
-            // fill BitVectorSet
-            InitialValues =
-                BitVectorSet<e_t>(EdgeFacts.begin(), EdgeFacts.end());
-          }
-          Seeds.addSeed(SP, GV, InitialValues);
+          l_t InitialValues = bvSetFrom(invoke_or_default(EdgeFactGen, GV));
+          Seeds.addSeed(SP, GV, std::move(InitialValues));
         }
       }
     });
@@ -691,7 +688,12 @@ public:
       if (SuccNode == Store->getPointerOperand() ||
           PT.isInReachableAllocationSites(Store->getPointerOperand(), SuccNode,
                                           true, Store)) {
-        return IIAAAddLabelsEFCache.createEdgeFunction(UserEdgeFacts);
+        if (isZeroValue(CurrNode)) {
+          return IIAAKillOrReplaceEFCache.createEdgeFunction(
+              std::move(UserEdgeFacts));
+        }
+        return IIAAAddLabelsEFCache.createEdgeFunction(
+            std::move(UserEdgeFacts));
       }
     }
 
@@ -709,7 +711,7 @@ public:
       //               v
       //               y
       //
-      if ((CurrNode == SuccNode) && CurrNode == Store->getPointerOperand()) {
+      if (CurrNode == SuccNode && CurrNode == Store->getPointerOperand()) {
         // y obtains its value(s) from its original allocation and the store
         // instruction under analysis.
         IF_LOG_ENABLED({
@@ -722,7 +724,8 @@ public:
           PHASAR_LOG_LEVEL(DFADEBUG, '\n');
         });
         // obtain label from the original allocation
-        return IIAAKillOrReplaceEFCache.createEdgeFunction(UserEdgeFacts);
+        return IIAAKillOrReplaceEFCache.createEdgeFunction(
+            std::move(UserEdgeFacts));
       }
 
     } else {
@@ -800,7 +803,11 @@ public:
 
       // We generate Curr in this instruction, so we have to annotate it with
       // edge labels
-      return IIAAAddLabelsEFCache.createEdgeFunction(UserEdgeFacts);
+      if (isZeroValue(CurrNode)) {
+        return IIAAKillOrReplaceEFCache.createEdgeFunction(
+            std::move(UserEdgeFacts));
+      }
+      return IIAAAddLabelsEFCache.createEdgeFunction(std::move(UserEdgeFacts));
     }
 
     // Otherwise stick to identity.
@@ -835,7 +842,7 @@ public:
       }
     }
     if (isZeroValue(SrcNode) && SRetParams.count(DestNode)) {
-      return IIAAAddLabelsEFCache.createEdgeFunction();
+      return IIAAKillOrReplaceEFCache.createEdgeFunction();
     }
     // Everything else can be passed as identity.
     return EdgeIdentity<l_t>{};
@@ -863,14 +870,8 @@ public:
       if (const auto *CD =
               llvm::dyn_cast<llvm::ConstantData>(Ret->getReturnValue())) {
         // Check if the user has registered a fact generator function
-        l_t UserEdgeFacts = BitVectorSet<e_t>();
-        std::set<e_t> EdgeFacts;
-        if (EdgeFactGen) {
-          EdgeFacts = EdgeFactGen(ExitInst);
-          // fill BitVectorSet
-          UserEdgeFacts = BitVectorSet<e_t>(EdgeFacts.begin(), EdgeFacts.end());
-        }
-        return IIAAAddLabelsEFCache.createEdgeFunction(
+        l_t UserEdgeFacts = bvSetFrom(invoke_or_default(EdgeFactGen, ExitInst));
+        return IIAAKillOrReplaceEFCache.createEdgeFunction(
             std::move(UserEdgeFacts));
       }
     }
@@ -883,34 +884,29 @@ public:
                            d_t RetSiteNode,
                            llvm::ArrayRef<f_t> Callees) override {
     // Check if the user has registered a fact generator function
-    l_t UserEdgeFacts = BitVectorSet<e_t>();
-    std::set<e_t> EdgeFacts;
-    if (EdgeFactGen) {
-      EdgeFacts = EdgeFactGen(CallSite);
-      // fill BitVectorSet
-      UserEdgeFacts = BitVectorSet<e_t>(EdgeFacts.begin(), EdgeFacts.end());
-    }
+    l_t UserEdgeFacts = bvSetFrom(invoke_or_default(EdgeFactGen, CallSite));
+
     // Model call to heap allocating functions (new, new[], malloc, etc.) --
     // only model direct calls, though.
     if (Callees.size() == 1) {
-      for (const auto *Callee : Callees) {
-        if (this->ICF->isHeapAllocatingFunction(Callee)) {
-          // Let H be a heap allocating function.
-          //
-          // 0 --> x
-          //
-          // Edge function:
-          //
-          //               0
-          //                \
+      const auto *Callee = Callees.front();
+
+      if (this->ICF->isHeapAllocatingFunction(Callee)) {
+        // Let H be a heap allocating function.
+        //
+        // 0 --> x
+        //
+        // Edge function:
+        //
+        //               0
+        //                \
           // %i = call H     \ \x.x \cup { commit of('%i = call H') }
-          //                  v
-          //                  i
-          //
-          if (isZeroValue(CallNode) && RetSiteNode == CallSite) {
-            return IIAAAddLabelsEFCache.createEdgeFunction(
-                std::move(UserEdgeFacts));
-          }
+        //                  v
+        //                  i
+        //
+        if (isZeroValue(CallNode) && RetSiteNode == CallSite) {
+          return IIAAKillOrReplaceEFCache.createEdgeFunction(
+              std::move(UserEdgeFacts));
         }
       }
     }
@@ -944,10 +940,6 @@ public:
     return nullptr;
   }
 
-  inline l_t topElement() override { return Top{}; }
-
-  inline l_t bottomElement() override { return Bottom{}; }
-
   inline l_t join(l_t Lhs, l_t Rhs) override { return joinImpl(Lhs, Rhs); }
 
   // Provide some handy helper edge functions to improve reuse.
@@ -956,82 +948,26 @@ public:
   // others).
   struct IIAAKillOrReplaceEF {
     using l_t = typename AnalysisDomainTy::l_t;
-    l_t Replacement{};
+    l_t Replacement = BitVectorSet<e_t>();
 
     l_t computeTarget(ByConstRef<l_t> /* Src */) const { return Replacement; }
 
-    static EdgeFunction<l_t> compose(EdgeFunctionRef<IIAAKillOrReplaceEF> This,
-                                     const EdgeFunction<l_t> SecondFunction) {
-
-      if (auto Default = defaultComposeOrNull(This, SecondFunction)) {
-        return Default;
-      }
-
-      auto Cache = This.getCacheOrNull();
-      assert(Cache != nullptr && "We expect a cache, because "
-                                 "IIAAKillOrReplaceEF is too large for SOO");
-
-      if (auto *AD = llvm::dyn_cast<IIAAAddLabelsEF>(SecondFunction)) {
-        auto ADCache =
-            SecondFunction.template getCacheOrNull<IIAAAddLabelsEF>();
-        assert(ADCache != nullptr);
-        if (This->isKillAll()) {
-          return ADCache->createEdgeFunction(*AD);
-        }
-        auto Union =
-            IDEInstInteractionAnalysisT::joinImpl(This->Replacement, AD->Data);
-        return ADCache->createEdgeFunction(std::move(Union));
-      }
-
-      if (auto *KR = llvm::dyn_cast<IIAAKillOrReplaceEF>(SecondFunction)) {
-        if (This->isKillAll()) {
-          return Cache->createEdgeFunction(*KR);
-        }
-        if (KR->isKillAll()) {
-          return SecondFunction;
-        }
-        auto Union = IDEInstInteractionAnalysisT::joinImpl(This->Replacement,
-                                                           KR->Replacement);
-        return Cache->createEdgeFunction(std::move(Union));
-      }
-      llvm::report_fatal_error(
-          "found unexpected edge function in 'IIAAKillOrReplaceEF'");
+    static EdgeFunction<l_t>
+    compose(EdgeFunctionRef<IIAAKillOrReplaceEF> /*This*/,
+            const EdgeFunction<l_t> /*SecondFunction*/) {
+      llvm::report_fatal_error("Implemented in 'extend'");
     }
 
-    static EdgeFunction<l_t> join(EdgeFunctionRef<IIAAKillOrReplaceEF> This,
-                                  const EdgeFunction<l_t> &OtherFunction) {
-      /// XXX: Here, we underapproximate joins with EdgeIdentity
-      if (llvm::isa<EdgeIdentity<l_t>>(OtherFunction)) {
-        return This;
-      }
-
-      if (auto Default = defaultJoinOrNull(This, OtherFunction)) {
-        return Default;
-      }
-
-      auto Cache = This.getCacheOrNull();
-      assert(Cache != nullptr && "We expect a cache, because "
-                                 "IIAAKillOrReplaceEF is too large for SOO");
-
-      if (auto *AD = llvm::dyn_cast<IIAAAddLabelsEF>(OtherFunction)) {
-        auto ADCache = OtherFunction.template getCacheOrNull<IIAAAddLabelsEF>();
-        assert(ADCache);
-        auto Union =
-            IDEInstInteractionAnalysisT::joinImpl(This->Replacement, AD->Data);
-        return ADCache->createEdgeFunction(std::move(Union));
-      }
-      if (auto *KR = llvm::dyn_cast<IIAAKillOrReplaceEF>(OtherFunction)) {
-        auto Union = IDEInstInteractionAnalysisT::joinImpl(This->Replacement,
-                                                           KR->Replacement);
-        return Cache->createEdgeFunction(std::move(Union));
-      }
-      llvm::report_fatal_error(
-          "found unexpected edge function in 'IIAAKillOrReplaceEF'");
+    static EdgeFunction<l_t> join(EdgeFunctionRef<IIAAKillOrReplaceEF> /*This*/,
+                                  const EdgeFunction<l_t> & /*OtherFunction*/) {
+      llvm::report_fatal_error("Implemented in 'combine'");
     }
 
     bool operator==(const IIAAKillOrReplaceEF &Other) const noexcept {
       return Replacement == Other.Replacement;
     }
+
+    [[nodiscard]] bool isConstant() const noexcept { return true; }
 
     friend llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
                                          const IIAAKillOrReplaceEF &EF) {
@@ -1061,61 +997,21 @@ public:
   // add all labels provided by Data.
   struct IIAAAddLabelsEF {
     using l_t = typename AnalysisDomainTy::l_t;
-    l_t Data{};
+    l_t Data = BitVectorSet<e_t>();
 
     l_t computeTarget(ByConstRef<l_t> Src) const {
       return IDEInstInteractionAnalysisT::joinImpl(Src, Data);
     }
 
-    static EdgeFunction<l_t> compose(EdgeFunctionRef<IIAAAddLabelsEF> This,
-                                     const EdgeFunction<l_t> &SecondFunction) {
-      if (auto Default = defaultComposeOrNull(This, SecondFunction)) {
-        return Default;
-      }
-
-      auto Cache = This.getCacheOrNull();
-      assert(Cache != nullptr && "We expect a cache, because "
-                                 "IIAAAddLabelsEF is too large for SOO");
-
-      if (auto *AD = llvm::dyn_cast<IIAAAddLabelsEF>(SecondFunction)) {
-        auto Union =
-            IDEInstInteractionAnalysisT::joinImpl(This->Data, AD->Data);
-        return Cache->createEdgeFunction(std::move(Union));
-      }
-      if (auto *KR = llvm::dyn_cast<IIAAKillOrReplaceEF>(SecondFunction)) {
-        return Cache->createEdgeFunction(KR->Replacement);
-      }
-      llvm::report_fatal_error(
-          "found unexpected edge function in 'IIAAAddLabelsEF'");
+    static EdgeFunction<l_t>
+    compose(EdgeFunctionRef<IIAAAddLabelsEF> /*This*/,
+            const EdgeFunction<l_t> & /*SecondFunction*/) {
+      llvm::report_fatal_error("Implemented in 'extend'");
     }
 
-    static EdgeFunction<l_t> join(EdgeFunctionRef<IIAAAddLabelsEF> This,
-                                  const EdgeFunction<l_t> &OtherFunction) {
-      /// XXX: Here, we underapproximate joins with EdgeIdentity
-      if (llvm::isa<EdgeIdentity<l_t>>(OtherFunction)) {
-        return This;
-      }
-
-      if (auto Default = defaultJoinOrNull(This, OtherFunction)) {
-        return Default;
-      }
-
-      auto Cache = This.getCacheOrNull();
-      assert(Cache != nullptr && "We expect a cache, because "
-                                 "IIAAAddLabelsEF is too large for SOO");
-
-      if (auto *AD = llvm::dyn_cast<IIAAAddLabelsEF>(OtherFunction)) {
-        auto Union =
-            IDEInstInteractionAnalysisT::joinImpl(This->Data, AD->Data);
-        return Cache->createEdgeFunction(std::move(Union));
-      }
-      if (auto *KR = llvm::dyn_cast<IIAAKillOrReplaceEF>(OtherFunction)) {
-        auto Union =
-            IDEInstInteractionAnalysisT::joinImpl(This->Data, KR->Replacement);
-        return Cache->createEdgeFunction(std::move(Union));
-      }
-      llvm::report_fatal_error(
-          "found unexpected edge function in 'IIAAAddLabelsEF'");
+    static EdgeFunction<l_t> join(EdgeFunctionRef<IIAAAddLabelsEF> /*This*/,
+                                  const EdgeFunction<l_t> & /*OtherFunction*/) {
+      llvm::report_fatal_error("Implemented in 'combine'");
     }
 
     bool operator==(const IIAAAddLabelsEF &Other) const noexcept {
@@ -1135,6 +1031,64 @@ public:
     }
   };
 
+  const auto &getData(const EdgeFunction<l_t> &EF) {
+    if (const auto *AddLabels = llvm::dyn_cast<IIAAAddLabelsEF>(EF)) {
+      return AddLabels->Data;
+    }
+    if (const auto *KillOrReplace = llvm::dyn_cast<IIAAKillOrReplaceEF>(EF)) {
+      return KillOrReplace->Replacement;
+    }
+    llvm::report_fatal_error(
+        "found unexpected first edge function in 'getData': " +
+        llvm::Twine(to_string(EF)));
+  }
+
+  EdgeFunction<l_t> extend(const EdgeFunction<l_t> &FirstFunction,
+                           const EdgeFunction<l_t> &SecondFunction) override {
+    if (auto Default = defaultComposeOrNull(FirstFunction, SecondFunction)) {
+      return Default;
+    }
+
+    const auto &ThisData = getData(FirstFunction);
+
+    if (auto *AD = llvm::dyn_cast<IIAAAddLabelsEF>(SecondFunction)) {
+      auto Union = IDEInstInteractionAnalysisT::joinImpl(ThisData, AD->Data);
+      return llvm::isa<IIAAAddLabelsEF>(FirstFunction)
+                 ? IIAAAddLabelsEFCache.createEdgeFunction(std::move(Union))
+                 : IIAAKillOrReplaceEFCache.createEdgeFunction(
+                       std::move(Union));
+    }
+
+    llvm::report_fatal_error(
+        "found unexpected second edge function in 'extend'");
+  }
+
+  EdgeFunction<l_t> combine(const EdgeFunction<l_t> &FirstFunction,
+                            const EdgeFunction<l_t> &OtherFunction) override {
+    /// XXX: Here, we underapproximate joins with EdgeIdentity
+    if (llvm::isa<EdgeIdentity<l_t>>(FirstFunction)) {
+      return OtherFunction;
+    }
+    if (llvm::isa<EdgeIdentity<l_t>>(OtherFunction) &&
+        !llvm::isa<AllTop<l_t>>(FirstFunction)) {
+      return FirstFunction;
+    }
+
+    if (auto Default = defaultJoinOrNull(FirstFunction, OtherFunction)) {
+      return Default;
+    }
+
+    const auto &ThisData = getData(FirstFunction);
+    const auto &OtherData = getData(OtherFunction);
+    auto Union = IDEInstInteractionAnalysisT::joinImpl(ThisData, OtherData);
+
+    if (llvm::isa<IIAAKillOrReplaceEF>(FirstFunction) &&
+        llvm::isa<IIAAKillOrReplaceEF>(OtherFunction)) {
+      return IIAAKillOrReplaceEFCache.createEdgeFunction(std::move(Union));
+    }
+    return IIAAAddLabelsEFCache.createEdgeFunction(std::move(Union));
+  }
+
   // Provide functionalities for printing things and emitting text reports.
 
   static void stripBottomResults(std::unordered_map<d_t, l_t> &Res) {
@@ -1147,7 +1101,7 @@ public:
     }
   }
 
-  void emitTextReport(const SolverResults<n_t, d_t, l_t> &SR,
+  void emitTextReport(GenericSolverResults<n_t, d_t, l_t> SR,
                       llvm::raw_ostream &OS = llvm::outs()) override {
     OS << "\n====================== IDE-Inst-Interaction-Analysis Report "
           "======================\n";
@@ -1183,7 +1137,7 @@ public:
   /// Computes all variables where a result set has been computed using the
   /// edge functions (and respective value domain).
   inline std::unordered_set<d_t>
-  getAllVariables(const SolverResults<n_t, d_t, l_t> & /* Solution */) const {
+  getAllVariables(GenericSolverResults<n_t, d_t, l_t> /* Solution */) const {
     std::unordered_set<d_t> Variables;
     // collect all variables that are available
     const llvm::Module *M = this->IRDB->getModule();
@@ -1196,7 +1150,7 @@ public:
       }
       if (const auto *H = llvm::dyn_cast<llvm::CallBase>(I)) {
         if (!H->isIndirectCall() && H->getCalledFunction() &&
-            this->ICF->isHeapAllocatingFunction(H->getCalledFunction())) {
+            psr::isHeapAllocatingFunction(H->getCalledFunction())) {
           Variables.insert(H);
         }
       }
@@ -1208,15 +1162,14 @@ public:
   /// Computes all variables for which an empty set has been computed using the
   /// edge functions (and respective value domain).
   inline std::unordered_set<d_t> getAllVariablesWithEmptySetValue(
-      const SolverResults<n_t, d_t, l_t> &Solution) const {
+      GenericSolverResults<n_t, d_t, l_t> Solution) const {
     return removeVariablesWithoutEmptySetValue(Solution,
                                                getAllVariables(Solution));
   }
 
 protected:
-  static inline bool isZeroValueImpl(d_t d) {
-    return LLVMZeroValue::isLLVMZeroValue(d);
-  }
+  // NOLINTNEXTLINE(readability-identifier-naming)
+  static constexpr auto isZeroValueImpl = LLVMZeroValue::isLLVMZeroValue;
 
   static void printEdgeFactImpl(llvm::raw_ostream &OS,
                                 ByConstRef<l_t> EdgeFact) {
@@ -1227,27 +1180,17 @@ protected:
     } else {
       auto LSet = std::get<BitVectorSet<e_t>>(EdgeFact);
       OS << "(set size: " << LSet.size() << ") values: ";
-      if constexpr (std::is_same_v<e_t, vara::Taint *>) {
-        for (const auto &LElem : LSet) {
-          std::string IRBuffer;
-          llvm::raw_string_ostream RSO(IRBuffer);
-          LElem->print(RSO);
-          RSO.flush();
-          OS << IRBuffer << ", ";
-        }
-      } else {
-        for (const auto &LElem : LSet) {
-          OS << LElem << ", ";
-        }
+      for (const auto &LElem : LSet) {
+        OS << LToString(LElem) << ", ";
       }
     }
   }
 
   static inline l_t joinImpl(ByConstRef<l_t> Lhs, ByConstRef<l_t> Rhs) {
-    if (Lhs.isTop() || Lhs.isBottom()) {
+    if (Lhs.isTop() || Rhs.isBottom()) {
       return Rhs;
     }
-    if (Rhs.isTop() || Rhs.isBottom()) {
+    if (Rhs.isTop() || Lhs.isBottom()) {
       return Lhs;
     }
     const auto &LhsSet = std::get<BitVectorSet<e_t>>(Lhs);
@@ -1259,33 +1202,29 @@ private:
   /// Filters out all variables that had a non-empty set during edge functions
   /// computations.
   inline std::unordered_set<d_t> removeVariablesWithoutEmptySetValue(
-      const SolverResults<n_t, d_t, l_t> &Solution,
+      GenericSolverResults<n_t, d_t, l_t> Solution,
       std::unordered_set<d_t> Variables) const {
     // Check the solver results and remove all variables for which a
     // non-empty set has been computed
-    auto Results = Solution.getAllResultEntries();
-    for (const auto &Result : Results) {
+    // auto Results = Solution.getAllResultEntries();
+    Solution.foreachResultEntry([&Variables](const auto &Result) {
       // We do not care for the concrete instruction at which data-flow facts
-      // hold, instead we just wish to find out if a variable has been generated
-      // at some point. Therefore, we only care for the variables and their
-      // associated values and ignore at which point a variable may holds as a
-      // data-flow fact.
-      const auto Variable = Result.getColumnKey();
-      const auto &Value = Result.getValue();
+      // hold, instead we just wish to find out if a variable has been
+      // generated at some point. Therefore, we only care for the variables
+      // and their associated values and ignore at which point a variable may
+      // holds as a data-flow fact.
+      const d_t &Variable = std::get<1>(Result);
+      const l_t &Value = std::get<2>(Result);
       // skip result entry if variable is not in the set of all variables
-      if (Variables.find(Variable) == Variables.end()) {
-        continue;
+      if (!Variables.count(Variable)) {
+        return;
       }
-      // skip result entry if the computed value is not of type BitVectorSet
-      if (!std::holds_alternative<BitVectorSet<e_t>>(Value)) {
-        continue;
-      }
-      // remove variable from result set if a non-empty that has been computed
-      auto &Values = std::get<BitVectorSet<e_t>>(Value);
-      if (!Values.empty()) {
+      if (const auto *Values = Value.getValueOrNull();
+          Values && !Values->empty()) {
         Variables.erase(Variable);
       }
-    }
+    });
+
     return Variables;
   }
 
@@ -1303,5 +1242,37 @@ private:
 using IDEInstInteractionAnalysis = IDEInstInteractionAnalysisT<>;
 
 } // namespace psr
+
+// Compatibility with llvm::DenseMap/DenseSet:
+namespace llvm {
+template <> struct DenseMapInfo<psr::IDEIIAFlowFact> {
+  static psr::IDEIIAFlowFact getEmptyKey() {
+    return psr::IDEIIAFlowFact(
+        DenseMapInfo<const llvm::Value *>::getEmptyKey());
+  }
+  static psr::IDEIIAFlowFact getTombstoneKey() {
+    return psr::IDEIIAFlowFact(
+        DenseMapInfo<const llvm::Value *>::getTombstoneKey());
+  }
+  static bool isEqual(const psr::IDEIIAFlowFact &L,
+                      const psr::IDEIIAFlowFact &R) {
+    const auto *Empty = DenseMapInfo<const llvm::Value *>::getEmptyKey();
+    const auto *TS = DenseMapInfo<const llvm::Value *>::getTombstoneKey();
+    if (L.getBase() == Empty) {
+      return R.getBase() == Empty;
+    }
+    if (L.getBase() == TS) {
+      return R.getBase() == TS;
+    }
+    if (R.getBase() == Empty || R.getBase() == TS) {
+      return false;
+    }
+    return L == R;
+  }
+  static unsigned getHashValue(const psr::IDEIIAFlowFact &FF) {
+    return std::hash<psr::IDEIIAFlowFact>{}(FF);
+  }
+};
+} // namespace llvm
 
 #endif

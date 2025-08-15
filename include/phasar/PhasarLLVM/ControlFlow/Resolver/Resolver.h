@@ -20,6 +20,7 @@
 #include "phasar/PhasarLLVM/Pointer/LLVMAliasInfo.h"
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/IR/DerivedTypes.h"
 
 #include <memory>
 #include <optional>
@@ -29,42 +30,66 @@ namespace llvm {
 class Instruction;
 class CallBase;
 class Function;
-class StructType;
+class DIType;
 } // namespace llvm
 
 namespace psr {
 class LLVMProjectIRDB;
-class LLVMTypeHierarchy;
+class LLVMVFTableProvider;
+class DIBasedTypeHierarchy;
 enum class CallGraphAnalysisType;
-class LLVMBasedICFG;
-class LLVMPointsToInfo;
 
+/// Assuming that `CallSite` is a virtual call through a vtable, retrieves the
+/// index in the vtable of the virtual function called.
 [[nodiscard]] std::optional<unsigned>
 getVFTIndex(const llvm::CallBase *CallSite);
 
-[[nodiscard]] const llvm::StructType *
+/// Assuming that `CallSite` is a call to a non-static member function,
+/// retrieves the type of the receiver. Returns nullptr, if the receiver-type
+/// could not be extracted
+[[nodiscard]] const llvm::DIType *
 getReceiverType(const llvm::CallBase *CallSite);
+
+/// Assuming that `CallSite` is a virtual call, where `Idx` is retrieved through
+/// `getVFTIndex()` and `T` through `getReceiverType()`
+[[nodiscard]] const llvm::Function *getNonPureVirtualVFTEntry(
+    const llvm::DIType *T, unsigned Idx, const llvm::CallBase *CallSite,
+    const psr::LLVMVFTableProvider &VTP, const llvm::DIType *ReceiverType);
 
 [[nodiscard]] std::string getReceiverTypeName(const llvm::CallBase *CallSite);
 
+/// Checks whether the signature of `DestFun` matches the required withature of
+/// `CallSite`, such that `DestFun` qualifies as callee-candidate, if `CallSite`
+/// is an indirect/virtual call.
 [[nodiscard]] bool isConsistentCall(const llvm::CallBase *CallSite,
                                     const llvm::Function *DestFun);
 
+[[nodiscard]] bool isVirtualCall(const llvm::Instruction *Inst,
+                                 const LLVMVFTableProvider &VTP);
+
+/// \brief A base class for call-target resolvers. Used to build call graphs.
+///
+/// Create a specific resolver by making a new class, inheriting this resolver
+/// class and implementing the virtual functions as needed.
 class Resolver {
 protected:
-  LLVMProjectIRDB &IRDB;
-  LLVMTypeHierarchy *TH;
-
-  Resolver(LLVMProjectIRDB &IRDB);
+  const LLVMProjectIRDB *IRDB;
+  const LLVMVFTableProvider *VTP;
 
   const llvm::Function *
-  getNonPureVirtualVFTEntry(const llvm::StructType *T, unsigned Idx,
-                            const llvm::CallBase *CallSite);
+  getNonPureVirtualVFTEntry(const llvm::DIType *T, unsigned Idx,
+                            const llvm::CallBase *CallSite,
+                            const llvm::DIType *ReceiverType) {
+    if (!VTP) {
+      return nullptr;
+    }
+    return psr::getNonPureVirtualVFTEntry(T, Idx, CallSite, *VTP, ReceiverType);
+  }
 
 public:
   using FunctionSetTy = llvm::SmallDenseSet<const llvm::Function *, 4>;
 
-  Resolver(LLVMProjectIRDB &IRDB, LLVMTypeHierarchy &TH);
+  Resolver(const LLVMProjectIRDB *IRDB, const LLVMVFTableProvider *VTP);
 
   virtual ~Resolver() = default;
 
@@ -75,17 +100,33 @@ public:
 
   virtual void postCall(const llvm::Instruction *Inst);
 
-  virtual FunctionSetTy resolveVirtualCall(const llvm::CallBase *CallSite) = 0;
-
-  virtual FunctionSetTy resolveFunctionPointer(const llvm::CallBase *CallSite);
+  [[nodiscard]] FunctionSetTy
+  resolveIndirectCall(const llvm::CallBase *CallSite);
 
   virtual void otherInst(const llvm::Instruction *Inst);
 
   [[nodiscard]] virtual std::string str() const = 0;
 
-  static std::unique_ptr<Resolver>
-  create(CallGraphAnalysisType Ty, LLVMProjectIRDB *IRDB, LLVMTypeHierarchy *TH,
-         LLVMBasedICFG *ICF = nullptr, LLVMAliasInfoRef PT = nullptr);
+  /// Whether the ICFG needs to reconsider all dynamic call-sites once there
+  /// have been changes through handlePossibleTargets().
+  ///
+  /// Make false for performance (may be less sound then)
+  [[nodiscard]] virtual bool mutatesHelperAnalysisInformation() const noexcept {
+    // Conservatively returns true. Override if possible
+    return true;
+  }
+  static std::unique_ptr<Resolver> create(CallGraphAnalysisType Ty,
+                                          const LLVMProjectIRDB *IRDB,
+                                          const LLVMVFTableProvider *VTP,
+                                          const DIBasedTypeHierarchy *TH,
+                                          LLVMAliasInfoRef PT = nullptr);
+
+protected:
+  virtual void resolveVirtualCall(FunctionSetTy &PossibleTargets,
+                                  const llvm::CallBase *CallSite) = 0;
+
+  virtual void resolveFunctionPointer(FunctionSetTy &PossibleTargets,
+                                      const llvm::CallBase *CallSite);
 };
 } // namespace psr
 

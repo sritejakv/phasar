@@ -17,14 +17,15 @@
 #ifndef PHASAR_PHASARLLVM_TYPEHIERARCHY_LLVMTYPEHIERARCHY_H_
 #define PHASAR_PHASARLLVM_TYPEHIERARCHY_LLVMTYPEHIERARCHY_H_
 
+#include "phasar/PhasarLLVM/TypeHierarchy/LLVMTypeHierarchyData.h"
 #include "phasar/PhasarLLVM/TypeHierarchy/LLVMVFTable.h"
 #include "phasar/TypeHierarchy/TypeHierarchy.h"
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include "boost/graph/adjacency_list.hpp"
 #include "boost/graph/graph_traits.hpp"
-#include "nlohmann/json.hpp"
 
 #include <optional>
 #include <set>
@@ -32,10 +33,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-#ifndef FRIEND_TEST
-#define FRIEND_TEST(TEST, CLASS)
-#endif
 
 namespace llvm {
 class Module;
@@ -54,7 +51,7 @@ class LLVMProjectIRDB;
  * 	hierarchy graph based on the data from the %ProjectIRCompiledDB
  * 	and reconstructing the virtual method tables.
  */
-class LLVMTypeHierarchy
+class [[deprecated("Use DIBasedTypeHierarchy instead")]] LLVMTypeHierarchy
     : public TypeHierarchy<const llvm::StructType *, const llvm::Function *> {
 public:
   struct VertexProperties {
@@ -113,41 +110,34 @@ private:
   // map from clearname to vtable variable
   std::unordered_map<std::string, const llvm::GlobalVariable *> ClearNameTVMap;
 
-  static std::string removeStructOrClassPrefix(const llvm::StructType &T);
+  std::vector<const llvm::StructType *> getSubTypes(
+      const llvm::Module &M, const llvm::StructType &Type) const;
 
-  static std::string removeStructOrClassPrefix(const std::string &TypeName);
-
-  static std::string removeTypeInfoPrefix(std::string VarName);
-
-  static std::string removeVTablePrefix(std::string VarName);
-
-  static bool isTypeInfo(const std::string &VarName);
-
-  static bool isVTable(const std::string &VarName);
-
-  static bool isStruct(const llvm::StructType &T);
-
-  static bool isStruct(llvm::StringRef TypeName);
-
-  std::vector<const llvm::StructType *>
-  getSubTypes(const llvm::Module &M, const llvm::StructType &Type);
-
-  std::vector<const llvm::Function *>
-  getVirtualFunctions(const llvm::Module &M, const llvm::StructType &Type);
-
-  FRIEND_TEST(LTHTest, GraphConstruction);
-  FRIEND_TEST(LTHTest, HandleLoadAndPrintOfNonEmptyGraph);
+  std::vector<const llvm::Function *> getVirtualFunctions(
+      const llvm::Module &M, const llvm::StructType &Type);
 
 protected:
   void buildLLVMTypeHierarchy(const llvm::Module &M);
 
 public:
+  static bool isTypeInfo(llvm::StringRef VarName);
+  static bool isVTable(llvm::StringRef VarName);
+  static bool isStruct(const llvm::StructType &T);
+  static bool isStruct(llvm::StringRef TypeName);
+
+  static std::string removeStructOrClassPrefix(const llvm::StructType &T);
+  static std::string removeStructOrClassPrefix(llvm::StringRef TypeName);
+  static std::string removeTypeInfoPrefix(llvm::StringRef VarName);
+  static std::string removeVTablePrefix(llvm::StringRef VarName);
+
   /**
    *  @brief Creates a LLVMStructTypeHierarchy based on the
    *         given ProjectIRCompiledDB.
    *  @param IRDB ProjectIRCompiledDB object.
    */
-  LLVMTypeHierarchy(LLVMProjectIRDB &IRDB);
+  LLVMTypeHierarchy(const LLVMProjectIRDB &IRDB);
+  LLVMTypeHierarchy(const LLVMProjectIRDB &IRDB,
+                    const LLVMTypeHierarchyData &SerializedData);
 
   /**
    *  @brief Creates a LLVMStructTypeHierarchy based on the
@@ -167,52 +157,39 @@ public:
    */
   void constructHierarchy(const llvm::Module &M);
 
-  [[nodiscard]] inline bool
-  hasType(const llvm::StructType *Type) const override {
+  [[nodiscard]] inline bool hasType(const llvm::StructType *Type)
+      const override {
     return TypeVertexMap.count(Type);
   }
 
-  [[nodiscard]] inline bool
-  isSubType(const llvm::StructType *Type,
-            const llvm::StructType *SubType) override {
+  [[nodiscard]] inline bool isSubType(const llvm::StructType *Type,
+                                      const llvm::StructType *SubType)
+      const override {
     auto ReachableTypes = getSubTypes(Type);
     return ReachableTypes.count(SubType);
   }
 
-  std::set<const llvm::StructType *>
-  getSubTypes(const llvm::StructType *Type) override;
+  std::set<const llvm::StructType *> getSubTypes(const llvm::StructType *Type)
+      const override;
 
-  [[nodiscard]] inline bool
-  isSuperType(const llvm::StructType *Type,
-              const llvm::StructType *SuperType) override {
-    return isSubType(SuperType, Type); // NOLINT
-  }
+  [[nodiscard]] const llvm::StructType *getType(llvm::StringRef TypeName)
+      const override;
 
-  std::set<const llvm::StructType *>
-  getSuperTypes(const llvm::StructType *Type) override;
+  [[nodiscard]] std::vector<const llvm::StructType *> getAllTypes()
+      const override;
 
-  [[nodiscard]] const llvm::StructType *
-  getType(std::string TypeName) const override;
+  [[nodiscard]] llvm::StringRef getTypeName(const llvm::StructType *Type)
+      const override;
 
-  [[nodiscard]] std::set<const llvm::StructType *> getAllTypes() const override;
-
-  [[nodiscard]] std::string
-  getTypeName(const llvm::StructType *Type) const override;
-
-  [[nodiscard]] bool hasVFTable(const llvm::StructType *Type) const override;
-
-  [[nodiscard]] const LLVMVFTable *
-  getVFTable(const llvm::StructType *Type) const override;
-
-  [[nodiscard]] inline size_t size() const override {
+  [[nodiscard]] size_t size() const noexcept override {
     return boost::num_vertices(TypeGraph);
   };
 
-  [[nodiscard]] inline bool empty() const override { return size() == 0; };
+  [[nodiscard]] bool empty() const noexcept override {
+    return boost::num_vertices(TypeGraph) == 0;
+  };
 
   void print(llvm::raw_ostream &OS = llvm::outs()) const override;
-
-  [[nodiscard]] nlohmann::json getAsJson() const override;
 
   // void mergeWith(LLVMTypeHierarchy &Other);
 
@@ -231,7 +208,7 @@ public:
    * @brief Prints the class hierarchy to an ostream in json format.
    * @param an outputstream
    */
-  void printAsJson(llvm::raw_ostream &OS = llvm::outs()) const;
+  void printAsJson(llvm::raw_ostream &OS = llvm::outs()) const override;
 
   // void printGraphAsDot(llvm::raw_ostream &out);
 

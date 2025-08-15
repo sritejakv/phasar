@@ -64,16 +64,6 @@ bool isConstructor(llvm::StringRef MangledName) {
   return false;
 }
 
-const llvm::Type *stripPointer(const llvm::Type *Pointer) {
-  const auto *Next = llvm::dyn_cast<llvm::PointerType>(Pointer);
-  while (Next) {
-    Pointer = Next->getElementType();
-    Next = llvm::dyn_cast<llvm::PointerType>(Pointer);
-  }
-
-  return Pointer;
-}
-
 bool isMangled(llvm::StringRef Name) {
   // See llvm/Demangle/Demangle.cpp
   if (Name.startswith("_Z") || Name.startswith("___Z")) {

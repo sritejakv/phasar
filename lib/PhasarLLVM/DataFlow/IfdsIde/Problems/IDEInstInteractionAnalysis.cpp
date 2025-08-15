@@ -9,6 +9,9 @@
 
 #include "phasar/PhasarLLVM/DataFlow/IfdsIde/Problems/IDEInstInteractionAnalysis.h"
 
+#include "phasar/PhasarLLVM/Utils/LLVMShorthands.h"
+
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Value.h"
@@ -67,7 +70,8 @@ IDEIIAFlowFact IDEIIAFlowFact::create(const llvm::Value *BaseVal) {
     }
     return {BaseVal, FieldDesc};
   }
-  llvm::report_fatal_error("Unexpected instruction!");
+  llvm::report_fatal_error("Unexpected instruction!" +
+                           llvm::Twine(llvmIRToString(BaseVal)));
 }
 
 bool IDEIIAFlowFact::flowFactEqual(const IDEIIAFlowFact &Other) const {
@@ -105,9 +109,8 @@ bool IDEIIAFlowFact::operator==(const IDEIIAFlowFact &Other) const {
   }
   auto EqualGEPDescriptor = [](const llvm::GetElementPtrInst *Lhs,
                                const llvm::GetElementPtrInst *Rhs) {
-    const auto *LhsI = llvm::dyn_cast<llvm::Instruction>(Lhs);
-    const auto *RhsI = llvm::dyn_cast<llvm::Instruction>(Rhs);
-    return LhsI->isSameOperationAs(RhsI);
+    return Lhs->getSourceElementType() == Rhs->getSourceElementType() &&
+           llvm::equal(Lhs->indices(), Rhs->indices());
   };
   for (unsigned Idx = 0; Idx < FieldDesc.size(); ++Idx) {
     if (!EqualGEPDescriptor(FieldDesc[Idx], Other.FieldDesc[Idx])) {

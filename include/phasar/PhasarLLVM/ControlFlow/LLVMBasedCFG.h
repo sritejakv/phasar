@@ -18,8 +18,6 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 
-#include "nlohmann/json.hpp"
-
 namespace llvm {
 class Function;
 } // namespace llvm
@@ -28,6 +26,9 @@ namespace psr {
 class LLVMBasedCFG;
 class LLVMBasedBackwardCFG;
 
+// Forward-declaration to avoid including LLVMShorthands.h here
+bool isHeapAllocatingFunction(const llvm::Function *F) noexcept;
+
 template <> struct CFGTraits<LLVMBasedCFG> {
   using n_t = const llvm::Instruction *;
   using f_t = const llvm::Function *;
@@ -35,9 +36,10 @@ template <> struct CFGTraits<LLVMBasedCFG> {
 
 template <> struct CFGTraits<LLVMBasedBackwardCFG> : CFGTraits<LLVMBasedCFG> {};
 
+/// \brief A class that implements a control flow graph. Conforms to the CFGBase
+/// CRTP interface.
 namespace detail {
 template <typename Derived> class LLVMBasedCFGImpl : public CFGBase<Derived> {
-  friend CFGBase<Derived>;
   friend class LLVMBasedBackwardCFG;
 
 public:
@@ -78,7 +80,9 @@ protected:
   [[nodiscard]] bool isFallThroughSuccessorImpl(n_t Inst,
                                                 n_t Succ) const noexcept;
   [[nodiscard]] bool isBranchTargetImpl(n_t Inst, n_t Succ) const noexcept;
-  [[nodiscard]] bool isHeapAllocatingFunctionImpl(f_t Fun) const;
+  [[nodiscard]] bool isHeapAllocatingFunctionImpl(f_t Fun) const {
+    return psr::isHeapAllocatingFunction(Fun);
+  }
   [[nodiscard]] bool isSpecialMemberFunctionImpl(f_t Fun) const {
     return this->getSpecialMemberFunctionType(Fun) !=
            SpecialMemberFunctionType{};

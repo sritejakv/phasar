@@ -24,10 +24,15 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <vector>
 
 namespace psr {
 
+/// \brief A solver class for interprocedual monotone problems (derived from
+/// InterMonoProblem). To solve the problem, call solve().
+///
+/// \tparam AnalysisDomainTy type of the analysis domain.
+/// \tparam K An unsigned integer used as the maximum length for call-string
+/// contexts.
 template <typename AnalysisDomainTy, unsigned K> class InterMonoSolver {
 public:
   using ProblemTy = InterMonoProblem<AnalysisDomainTy>;
@@ -368,18 +373,8 @@ public:
       }
       // Compute the data-flow facts using the respective kind of flows
       if (ICF->isCallSite(Src)) {
-        // Handle call flow(s)
-        if (!isIntraEdge(Edge)) {
-          // real call
-          for (auto &[Ctx, Facts] : Analysis[Src]) {
-            processCall(Edge); // TODO: decompose into processCall and
-                               // processCallToRet
-          }
-        } else {
-          // call-to-return
-          processCall(
-              Edge); // TODO: decompose into processCall and processCallToRet
-        }
+        // Handle call flow(s) and call-to-return flow
+        processCall(Edge);
       } else if (ICF->isExitInst(Src)) {
         // Handle return flow
         processExit(Edge);

@@ -17,20 +17,20 @@
 #include "phasar/PhasarLLVM/Utils/LLVMShorthands.h"
 
 #include "phasar/Config/Configuration.h"
-#include "phasar/PhasarLLVM/DB/LLVMProjectIRDB.h"
-#include "phasar/Utils/Logger.h"
+#include "phasar/Utils/LibrarySummary.h"
 #include "phasar/Utils/Utilities.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
-#include "llvm/IR/AbstractCallSite.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/IR/Value.h"
@@ -38,34 +38,13 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "boost/algorithm/string/trim.hpp"
-
-#include <cctype>
-#include <charconv>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
-#include <optional>
-#include <system_error>
 
-using namespace std;
 using namespace psr;
 
-namespace psr {
-
-/// Set of functions that allocate heap memory, e.g. new, new[], malloc.
-const set<string> HeapAllocationFunctions = {"_Znwm", "_Znam", "malloc",
-                                             "calloc", "realloc"};
-
-bool isFunctionPointer(const llvm::Value *V) noexcept {
-  if (V) {
-    return V->getType()->isPointerTy() &&
-           V->getType()->getPointerElementType()->isFunctionTy();
-  }
-  return false;
-}
-
-bool isIntegerLikeType(const llvm::Type *T) noexcept {
+bool psr::isIntegerLikeType(const llvm::Type *T) noexcept {
   if (const auto *StructType = llvm::dyn_cast<llvm::StructType>(T)) {
     return StructType->isPacked() && StructType->elements().size() == 1 &&
            StructType->getElementType(0)->isIntegerTy();
@@ -73,24 +52,36 @@ bool isIntegerLikeType(const llvm::Type *T) noexcept {
   return false;
 }
 
-bool isAllocaInstOrHeapAllocaFunction(const llvm::Value *V) noexcept {
-  if (V) {
-    if (llvm::isa<llvm::AllocaInst>(V)) {
-      return true;
-    }
-    if (const auto *CallSite = llvm::dyn_cast<llvm::CallBase>(V)) {
-      return CallSite->getCalledFunction() != nullptr &&
-             HeapAllocationFunctions.count(
-                 CallSite->getCalledFunction()->getName().str());
-    }
+bool psr::isAllocaInstOrHeapAllocaFunction(const llvm::Value *V) noexcept {
+  if (!V) {
     return false;
+  }
+
+  if (llvm::isa<llvm::AllocaInst>(V)) {
+    return true;
+  }
+  if (const auto *CallSite = llvm::dyn_cast<llvm::CallBase>(V)) {
+    return CallSite->getCalledFunction() &&
+           isHeapAllocatingFunction(CallSite->getCalledFunction());
   }
   return false;
 }
 
+bool psr::isHeapAllocatingFunction(const llvm::Function *Fun) noexcept {
+  auto FunName = Fun->getName();
+
+  if (FunName == "realloc") {
+    // For backwards compatibility. We should treat realloc specially.
+    return true;
+  }
+
+  return isHeapAllocatingFunction(FunName);
+}
+
 // For C-style polymorphism we need to check whether a callee candidate would
 // be able to sanely access the formal argument.
-bool isTypeMatchForFunctionArgument(llvm::Type *Actual, llvm::Type *Formal) {
+static bool isTypeMatchForFunctionArgument(llvm::Type *Actual,
+                                           llvm::Type *Formal) {
   // First check for trivial type equality
   if (Actual == Formal) {
     return true;
@@ -102,11 +93,13 @@ bool isTypeMatchForFunctionArgument(llvm::Type *Actual, llvm::Type *Formal) {
   // For PointerType delegate into its element type
   if (llvm::isa<llvm::PointerType>(Actual)) {
     // If formal argument is void *, we can pass anything.
-    if (Formal->getPointerElementType()->isIntegerTy(8)) {
+    if (Actual->isOpaquePointerTy() || Formal->isOpaquePointerTy() ||
+        Formal->getNonOpaquePointerElementType()->isIntegerTy(8)) {
       return true;
     }
-    return isTypeMatchForFunctionArgument(Actual->getPointerElementType(),
-                                          Formal->getPointerElementType());
+    return isTypeMatchForFunctionArgument(
+        Actual->getNonOpaquePointerElementType(),
+        Formal->getNonOpaquePointerElementType());
   }
   // For structs, Formal needs to be somehow contained in Actual.
   if (llvm::isa<llvm::StructType>(Actual)) {
@@ -118,8 +111,8 @@ bool isTypeMatchForFunctionArgument(llvm::Type *Actual, llvm::Type *Formal) {
   return false;
 }
 
-bool matchesSignature(const llvm::Function *F, const llvm::FunctionType *FType,
-                      bool ExactMatch) {
+bool psr::matchesSignature(const llvm::Function *F,
+                           const llvm::FunctionType *FType, bool ExactMatch) {
   // FType->print(llvm::outs());
   if (F == nullptr || FType == nullptr) {
     return false;
@@ -142,8 +135,8 @@ bool matchesSignature(const llvm::Function *F, const llvm::FunctionType *FType,
   return false;
 }
 
-bool matchesSignature(const llvm::FunctionType *FType1,
-                      const llvm::FunctionType *FType2) {
+bool psr::matchesSignature(const llvm::FunctionType *FType1,
+                           const llvm::FunctionType *FType2) {
   if (FType1 == nullptr || FType2 == nullptr) {
     return false;
   }
@@ -159,12 +152,12 @@ bool matchesSignature(const llvm::FunctionType *FType1,
   return false;
 }
 
-llvm::ModuleSlotTracker &getModuleSlotTrackerFor(const llvm::Value *V) {
+llvm::ModuleSlotTracker &psr::getModuleSlotTrackerFor(const llvm::Value *V) {
   const auto *M = getModuleFromVal(V);
   return ModulesToSlotTracker::getSlotTrackerForModule(M);
 }
 
-std::string llvmIRToString(const llvm::Value *V) {
+std::string psr::llvmIRToString(const llvm::Value *V) {
   if (!V) {
     return "<null>";
   }
@@ -177,7 +170,7 @@ std::string llvmIRToString(const llvm::Value *V) {
   return llvm::StringRef(IRBuffer).ltrim().str();
 }
 
-std::string llvmIRToStableString(const llvm::Value *V) {
+std::string psr::llvmIRToStableString(const llvm::Value *V) {
   if (!V) {
     return "<null>";
   }
@@ -204,7 +197,7 @@ std::string llvmIRToStableString(const llvm::Value *V) {
   return IRBuffer;
 }
 
-std::string llvmIRToShortString(const llvm::Value *V) {
+std::string psr::llvmIRToShortString(const llvm::Value *V) {
   if (!V) {
     return "<null>";
   }
@@ -214,7 +207,9 @@ std::string llvmIRToShortString(const llvm::Value *V) {
       I && !I->getType()->isVoidTy()) {
     V->printAsOperand(RSO, true, getModuleSlotTrackerFor(V));
   } else if (const auto *F = llvm::dyn_cast<llvm::Function>(V)) {
-    RSO << F->getName();
+    RSO << "fun @" << F->getName();
+  } else if (const auto *Glob = llvm::dyn_cast<llvm::GlobalVariable>(V)) {
+    RSO << "glob @" << Glob->getName();
   } else {
     V->print(RSO, getModuleSlotTrackerFor(V));
   }
@@ -223,7 +218,7 @@ std::string llvmIRToShortString(const llvm::Value *V) {
   return llvm::StringRef(IRBuffer).ltrim().str();
 }
 
-std::string llvmTypeToString(const llvm::Type *Ty, bool Shorten) {
+std::string psr::llvmTypeToString(const llvm::Type *Ty, bool Shorten) {
   if (!Ty) {
     return "<null>";
   }
@@ -240,15 +235,30 @@ std::string llvmTypeToString(const llvm::Type *Ty, bool Shorten) {
   return IRBuffer;
 }
 
-void dumpIRValue(const llvm::Value *V) {
+void psr::dumpIRValue(const llvm::Value *V) {
   llvm::outs() << llvmIRToString(V) << '\n';
 }
-void dumpIRValue(const llvm::Instruction *V) {
+void psr::dumpIRValue(const llvm::Instruction *V) {
+  llvm::outs() << llvmIRToString(V) << '\n';
+}
+void psr::dumpIRValue(const llvm::Function *V) {
   llvm::outs() << llvmIRToString(V) << '\n';
 }
 
+void psr::dumpDIType(const llvm::DIType *Ty) {
+  if (!Ty) {
+    llvm::errs() << "<null>\n";
+  }
+
+  Ty->print(llvm::errs());
+}
+
+void psr::dumpDIType(const llvm::DIDerivedType *Ty) {
+  dumpDIType(static_cast<const llvm::DIType *>(Ty));
+}
+
 std::vector<const llvm::Value *>
-globalValuesUsedinFunction(const llvm::Function *F) {
+psr::globalValuesUsedinFunction(const llvm::Function *F) {
   std::vector<const llvm::Value *> GlobalsUsed;
   for (const auto &BB : *F) {
     for (const auto &I : BB) {
@@ -263,7 +273,7 @@ globalValuesUsedinFunction(const llvm::Function *F) {
   return GlobalsUsed;
 }
 
-std::string getMetaDataID(const llvm::Value *V) {
+std::string psr::getMetaDataID(const llvm::Value *V) {
   if (const auto *Inst = llvm::dyn_cast<llvm::Instruction>(V)) {
     if (auto *Metadata = Inst->getMetadata(PhasarConfig::MetaDataKind())) {
       return llvm::cast<llvm::MDString>(Metadata->getOperand(0))
@@ -278,9 +288,9 @@ std::string getMetaDataID(const llvm::Value *V) {
           .str();
     }
   } else if (const auto *Arg = llvm::dyn_cast<llvm::Argument>(V)) {
-    string FName = Arg->getParent()->getName().str();
-    string ArgNr = std::to_string(getFunctionArgumentNr(Arg));
-    return string(FName + "." + ArgNr);
+    std::string FName = Arg->getParent()->getName().str();
+    std::string ArgNr = std::to_string(getFunctionArgumentNr(Arg));
+    return FName + "." + ArgNr;
   }
   return "-1";
 }
@@ -292,12 +302,12 @@ bool LLVMValueIDLess::operator()(const llvm::Value *Lhs,
   return StringIDLess{}(LhsId, RhsId);
 }
 
-int getFunctionArgumentNr(const llvm::Argument *Arg) {
+int psr::getFunctionArgumentNr(const llvm::Argument *Arg) {
   return int(Arg->getArgNo());
 }
 
-const llvm::Argument *getNthFunctionArgument(const llvm::Function *F,
-                                             unsigned ArgNo) {
+const llvm::Argument *psr::getNthFunctionArgument(const llvm::Function *F,
+                                                  unsigned ArgNo) {
   if (ArgNo >= F->arg_size()) {
     return nullptr;
   }
@@ -305,12 +315,12 @@ const llvm::Argument *getNthFunctionArgument(const llvm::Function *F,
   return F->getArg(ArgNo);
 }
 
-const llvm::Instruction *getLastInstructionOf(const llvm::Function *F) {
+const llvm::Instruction *psr::getLastInstructionOf(const llvm::Function *F) {
   return &F->back().back();
 }
 
-const llvm::Instruction *getNthInstruction(const llvm::Function *F,
-                                           unsigned Idx) {
+const llvm::Instruction *psr::getNthInstruction(const llvm::Function *F,
+                                                unsigned Idx) {
   unsigned Current = 1;
   for (const auto &BB : *F) {
     for (const auto &I : BB) {
@@ -325,15 +335,16 @@ const llvm::Instruction *getNthInstruction(const llvm::Function *F,
 }
 
 llvm::SmallVector<const llvm::Instruction *, 2>
-getAllExitPoints(const llvm::Function *F) {
+psr::getAllExitPoints(const llvm::Function *F, bool IncludeResume) {
   llvm::SmallVector<const llvm::Instruction *, 2> Ret;
-  appendAllExitPoints(F, Ret);
+  appendAllExitPoints(F, Ret, IncludeResume);
   return Ret;
 }
 
-void appendAllExitPoints(
+void psr::appendAllExitPoints(
     const llvm::Function *F,
-    llvm::SmallVectorImpl<const llvm::Instruction *> &ExitPoints) {
+    llvm::SmallVectorImpl<const llvm::Instruction *> &ExitPoints,
+    bool IncludeResume) {
   if (!F) {
     return;
   }
@@ -343,13 +354,13 @@ void appendAllExitPoints(
     assert(Term && "Invalid IR: Each BasicBlock must have a terminator "
                    "instruction at the end");
     if (llvm::isa<llvm::ReturnInst>(Term) ||
-        llvm::isa<llvm::ResumeInst>(Term)) {
+        (IncludeResume && llvm::isa<llvm::ResumeInst>(Term))) {
       ExitPoints.push_back(Term);
     }
   }
 }
 
-const llvm::Module *getModuleFromVal(const llvm::Value *V) {
+const llvm::Module *psr::getModuleFromVal(const llvm::Value *V) {
   if (const auto *MA = llvm::dyn_cast<llvm::Argument>(V)) {
     return MA->getParent() ? MA->getParent()->getParent() : nullptr;
   }
@@ -378,12 +389,12 @@ const llvm::Module *getModuleFromVal(const llvm::Value *V) {
   return nullptr;
 }
 
-std::string getModuleNameFromVal(const llvm::Value *V) {
+std::string psr::getModuleNameFromVal(const llvm::Value *V) {
   const llvm::Module *M = getModuleFromVal(V);
   return M ? M->getModuleIdentifier() : " ";
 }
 
-std::size_t computeModuleHash(llvm::Module *M, bool ConsiderIdentifier) {
+std::size_t psr::computeModuleHash(llvm::Module *M, bool ConsiderIdentifier) {
   std::string SourceCode;
   if (ConsiderIdentifier) {
     llvm::raw_string_ostream RSO(SourceCode);
@@ -400,7 +411,7 @@ std::size_t computeModuleHash(llvm::Module *M, bool ConsiderIdentifier) {
   return std::hash<std::string>{}(SourceCode);
 }
 
-std::size_t computeModuleHash(const llvm::Module *M) {
+std::size_t psr::computeModuleHash(const llvm::Module *M) {
   std::string SourceCode;
   llvm::raw_string_ostream RSO(SourceCode);
   llvm::WriteBitcodeToFile(*M, RSO);
@@ -408,8 +419,8 @@ std::size_t computeModuleHash(const llvm::Module *M) {
   return std::hash<std::string>{}(SourceCode);
 }
 
-const llvm::Instruction *getNthTermInstruction(const llvm::Function *F,
-                                               unsigned TermInstNo) {
+const llvm::Instruction *psr::getNthTermInstruction(const llvm::Function *F,
+                                                    unsigned TermInstNo) {
   unsigned Current = 1;
   for (const auto &BB : *F) {
     if (const llvm::Instruction *T = BB.getTerminator()) {
@@ -422,8 +433,8 @@ const llvm::Instruction *getNthTermInstruction(const llvm::Function *F,
   return nullptr;
 }
 
-const llvm::StoreInst *getNthStoreInstruction(const llvm::Function *F,
-                                              unsigned StoNo) {
+const llvm::StoreInst *psr::getNthStoreInstruction(const llvm::Function *F,
+                                                   unsigned StoNo) {
   unsigned Current = 1;
   for (const auto &BB : *F) {
     for (const auto &I : BB) {
@@ -438,7 +449,7 @@ const llvm::StoreInst *getNthStoreInstruction(const llvm::Function *F,
   return nullptr;
 }
 
-bool isGuardVariable(const llvm::Value *V) {
+bool psr::isGuardVariable(const llvm::Value *V) {
   if (const auto *ConstBitcast = llvm::dyn_cast<llvm::ConstantExpr>(V);
       ConstBitcast && ConstBitcast->isCast()) {
     V = ConstBitcast->getOperand(0);
@@ -450,7 +461,8 @@ bool isGuardVariable(const llvm::Value *V) {
   return false;
 }
 
-bool isStaticVariableLazyInitializationBranch(const llvm::BranchInst *Inst) {
+bool psr::isStaticVariableLazyInitializationBranch(
+    const llvm::BranchInst *Inst) {
   if (Inst->isUnconditional()) {
     return false;
   }
@@ -479,13 +491,14 @@ bool isStaticVariableLazyInitializationBranch(const llvm::BranchInst *Inst) {
   return false;
 }
 
-bool isVarAnnotationIntrinsic(const llvm::Function *F) {
+bool psr::isVarAnnotationIntrinsic(const llvm::Function *F) {
   static constexpr llvm::StringLiteral KVarAnnotationName(
       "llvm.var.annotation");
   return F->getName() == KVarAnnotationName;
 }
 
-llvm::StringRef getVarAnnotationIntrinsicName(const llvm::CallInst *CallInst) {
+llvm::StringRef
+psr::getVarAnnotationIntrinsicName(const llvm::CallInst *CallInst) {
   const int KPointerGlobalStringIdx = 1;
   auto *CE = llvm::cast<llvm::ConstantExpr>(
       CallInst->getOperand(KPointerGlobalStringIdx));
@@ -566,4 +579,41 @@ void ModulesToSlotTracker::deleteMSTForModule(const llvm::Module *M) {
   }
 }
 
-} // namespace psr
+const llvm::AllocaInst *psr::getVaListTagOrNull(const llvm::Function &Fun) {
+  if (Fun.isDeclaration()) {
+    return nullptr;
+  }
+  for (const auto &I : llvm::instructions(Fun)) {
+    if (const auto *Alloca = llvm::dyn_cast<llvm::AllocaInst>(&I);
+        Alloca && isVaListAlloca(*Alloca)) {
+      return Alloca;
+    }
+  }
+  return nullptr;
+}
+
+bool psr::isVaListAlloca(const llvm::AllocaInst &Alloc) {
+  // Over-approximate by trying to add the
+  //   alloca [1 x %struct.__va_list_tag], align 16
+  // to the results
+
+  const auto *Ty = Alloc.getAllocatedType();
+  if (Ty->isArrayTy() && Ty->getArrayNumElements() > 0 &&
+      Ty->getArrayElementType()->isStructTy() &&
+      Ty->getArrayElementType()->getStructName() == "struct.__va_list_tag") {
+    return true;
+  }
+
+  // On windows, the alloca just allocates a pointer that is directly used by
+  // the va_start intrinsic.
+  // Note that on linux (where the above __va_list_tag heuristic works), the
+  // alloca is *not* directly used by the va_start intrinsic; there, a gep lays
+  // in between
+  for (const auto &Use : Alloc.uses()) {
+    if (llvm::isa<llvm::VAStartInst>(Use.getUser())) {
+      return true;
+    }
+  }
+
+  return false;
+}

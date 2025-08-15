@@ -19,8 +19,6 @@
 
 #include "llvm/IR/PassManager.h"
 
-#include "nlohmann/json.hpp"
-
 #include <set>
 
 namespace llvm {
@@ -33,106 +31,52 @@ class Module;
 
 namespace psr {
 
-class GeneralStatistics {
-private:
-  friend class GeneralStatisticsAnalysis;
+struct GeneralStatistics {
+
   size_t Functions = 0;
+  size_t ExternalFunctions = 0;
+  size_t FunctionDefinitions = 0;
+  size_t AddressTakenFunctions = 0;
   size_t Globals = 0;
+  size_t GlobalConsts = 0;
+  size_t ExternalGlobals = 0;
+  size_t GlobalsDefinitions = 0;
   size_t BasicBlocks = 0;
   size_t AllocationSites = 0;
   size_t CallSites = 0;
+  size_t DebugIntrinsics = 0;
   size_t Instructions = 0;
   size_t StoreInstructions = 0;
   size_t LoadInstructions = 0;
   size_t MemIntrinsics = 0;
-  size_t GlobalPointers = 0;
   size_t Branches = 0;
+  size_t Switches = 0;
   size_t GetElementPtrs = 0;
+  size_t LandingPads = 0;
   size_t PhiNodes = 0;
-  size_t GlobalConsts = 0;
+  size_t NumInlineAsm = 0;
+  size_t IndCalls = 0;
+  size_t TotalNumOperands = 0;
+  size_t TotalNumUses = 0;
+  size_t TotalNumPredecessorBBs = 0;
+  size_t TotalNumSuccessorBBs = 0;
+  size_t MaxNumOperands = 0;
+  size_t MaxNumUses = 0;
+  size_t MaxNumPredecessorBBs = 0;
+  size_t MaxNumSuccessorBBs = 0;
+  size_t NumInstWithMultipleUses = 0;
+  size_t NumInstsUsedOutsideBB = 0;
+  size_t NonVoidInsts = 0;
   std::set<const llvm::Type *> AllocatedTypes;
   std::set<const llvm::Instruction *> AllocaInstructions;
   std::set<const llvm::Instruction *> RetResInstructions;
-  std::string ModuleName = "";
+  std::string ModuleName{};
 
-public:
-  /**
-   * @brief Returns the number of Allocation sites.
-   */
-  [[nodiscard]] size_t getAllocationsites() const;
-
-  /**
-   * @brief Returns the number of Function calls.
-   */
-  [[nodiscard]] size_t getFunctioncalls() const;
-
-  /**
-   * @brief Returns the number of Instructions.
-   */
-  [[nodiscard]] size_t getInstructions() const;
-
-  /**
-   * @brief Returns the number of global pointers.
-   */
-  [[nodiscard]] size_t getGlobalPointers() const;
-
-  /**
-   * @brief Returns the number of basic blocks.
-   */
-  [[nodiscard]] size_t getBasicBlocks() const;
-
-  /**
-   * @brief Returns the number of functions.
-   */
-  [[nodiscard]] size_t getFunctions() const;
-
-  /**
-   * @brief Returns the number of globals.
-   */
-  [[nodiscard]] size_t getGlobals() const;
-
-  /**
-   * @brief Returns the number of constant globals.
-   */
-  [[nodiscard]] size_t getGlobalConsts() const;
-
-  /**
-   * @brief Returns the number of memory intrinsics.
-   */
-  [[nodiscard]] size_t getMemoryIntrinsics() const;
-
-  /**
-   * @brief Returns the number of store instructions.
-   */
-  [[nodiscard]] size_t getStoreInstructions() const;
-
-  /**
-   * @brief Returns the number of load instructions.
-   */
-  [[nodiscard]] size_t getLoadInstructions();
-
-  /**
-   * @brief Returns all possible Types.
-   */
-  [[nodiscard]] const std::set<const llvm::Type *> &getAllocatedTypes() const;
-
-  /**
-   * @brief Returns all stack and heap allocating instructions.
-   */
-  [[nodiscard]] const std::set<const llvm::Instruction *> &
-  getAllocaInstructions() const;
-
-  /**
-   * @brief Returns all Return and Resume Instructions.
-   */
-  [[nodiscard]] const std::set<const llvm::Instruction *> &
-  getRetResInstructions() const;
-  [[nodiscard]] nlohmann::json getAsJson() const;
   void printAsJson(llvm::raw_ostream &OS = llvm::outs()) const;
-
-  friend llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
-                                       const GeneralStatistics &Statistics);
 };
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
+                              const GeneralStatistics &Statistics);
 
 /**
  * This class uses the Module Pass Mechanism of LLVM to compute

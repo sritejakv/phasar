@@ -16,6 +16,7 @@
 #include "phasar/PhasarLLVM/Utils/LLVMShorthands.h"
 #include "phasar/Utils/Logger.h"
 
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
@@ -130,7 +131,6 @@ LLVMTaintConfig::LLVMTaintConfig(const psr::LLVMProjectIRDB &Code,
   std::unordered_map<const llvm::Type *, const std::string> StructConfigMap;
 
   // read all struct types from config
-  size_t Counter = 0;
   for (const auto &VarDesc : Config.Variables) {
     llvm::DebugInfoFinder DIF;
     const auto *M = Code.getModule();
@@ -163,8 +163,8 @@ LLVMTaintConfig::LLVMTaintConfig(const psr::LLVMProjectIRDB &Code,
         } else if (!StructConfigMap.empty()) {
           // Ignorning line numbers for getElementPtr instructions
           if (const auto *Gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&I)) {
-            const auto *StType = llvm::dyn_cast<llvm::StructType>(
-                Gep->getPointerOperandType()->getPointerElementType());
+            const auto *StType =
+                llvm::dyn_cast<llvm::StructType>(Gep->getSourceElementType());
             if (StType && StructConfigMap.count(StType)) {
               auto VarName = StructConfigMap.at(StType);
               // using substr to cover the edge case in which same variable
@@ -366,7 +366,7 @@ void LLVMTaintConfig::forAllLeakCandidatesAtImpl(
     }
   }
 
-  // Do not iterate over the actual paramaters of Inst as we did in
+  // Do not iterate over the actual parameters of Inst as we did in
   // forAllGeneratedValuesAt, because sink-values are not propagated in the
   // current taint analyses. Handling sink-values should be done in the
   // SinkCallBack
@@ -474,7 +474,7 @@ void LLVMTaintConfig::printImpl(llvm::raw_ostream &OS) const {
   OS << "TaintConfiguration: ";
   if (SourceValues.empty() && SinkValues.empty() && SanitizerValues.empty() &&
       !getRegisteredSourceCallBack() && !getRegisteredSinkCallBack()) {
-    OS << "empty";
+    OS << "empty\n";
     return;
   }
   OS << "\n\tSourceCallBack registered: " << (bool)SourceCallBack << '\n';

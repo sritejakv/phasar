@@ -15,24 +15,19 @@
 #include "phasar/DataFlow/IfdsIde/FlowFunctions.h"
 #include "phasar/DataFlow/IfdsIde/IDETabulationProblem.h"
 #include "phasar/PhasarLLVM/ControlFlow/LLVMBasedCFG.h"
-#include "phasar/PhasarLLVM/DataFlow/IfdsIde/LLVMFlowFunctions.h"
 #include "phasar/PhasarLLVM/DataFlow/IfdsIde/LLVMZeroValue.h"
 #include "phasar/PhasarLLVM/Domain/LLVMAnalysisDomain.h"
 #include "phasar/PhasarLLVM/Pointer/LLVMAliasInfo.h"
-#include "phasar/Utils/ByRef.h"
 #include "phasar/Utils/JoinLattice.h"
 #include "phasar/Utils/Logger.h"
 #include "phasar/Utils/Printer.h"
-#include "phasar/Utils/TypeTraits.h"
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Value.h"
 
-#include <memory>
 #include <set>
 #include <string>
 #include <type_traits>
@@ -516,41 +511,23 @@ public:
     return Name.contains(TSD->getTypeNameOfInterest());
   }
 
-  void emitTextReport(const SolverResults<n_t, d_t, l_t> &SR,
+  void emitTextReport(GenericSolverResults<n_t, d_t, l_t> SR,
                       llvm::raw_ostream &OS = llvm::outs()) override {
     LLVMBasedCFG CFG;
-    OS << "\n======= TYPE STATE RESULTS =======\n";
     for (const auto &F : this->IRDB->getAllFunctions()) {
-      OS << '\n' << F->getName() << '\n';
       for (const auto &BB : *F) {
         for (const auto &I : BB) {
           auto Results = SR.resultsAt(&I, true);
+
           if (CFG.isExitInst(&I)) {
-            OS << "\nAt exit stmt: " << NToString(&I) << '\n';
             for (auto Res : Results) {
               if (const auto *Alloca =
                       llvm::dyn_cast<llvm::AllocaInst>(Res.first)) {
                 if (Res.second == TSD->error()) {
-                  OS << "\n=== ERROR STATE DETECTED ===\nAlloca: "
-                     << DToString(Res.first) << '\n';
-                  for (const auto *Pred : CFG.getPredsOf(&I)) {
-                    OS << "\nPredecessor: " << NToString(Pred) << '\n';
-                    auto PredResults = SR.resultsAt(Pred, true);
-                    for (auto Res : PredResults) {
-                      if (Res.first == Alloca) {
-                        OS << "Pred State: " << LToString(Res.second) << '\n';
-                      }
-                    }
-                  }
-                  OS << "============================\n";
-                } else {
-                  OS << "\nAlloca : " << DToString(Res.first)
-                     << "\nState  : " << LToString(Res.second) << '\n';
+                  // ERROR STATE DETECTED
+                  this->Printer->onResult(&I, Res.first, TSD->error(),
+                                          TSD->analysisType());
                 }
-              } else {
-                OS << "\nInst: " << NToString(&I) << '\n'
-                   << "Fact: " << DToString(Res.first) << '\n'
-                   << "State: " << LToString(Res.second) << '\n';
               }
             }
           } else {
@@ -558,31 +535,31 @@ public:
               if (const auto *Alloca =
                       llvm::dyn_cast<llvm::AllocaInst>(Res.first)) {
                 if (Res.second == TSD->error()) {
-                  OS << "\n=== ERROR STATE DETECTED ===\nAlloca: "
-                     << DToString(Res.first) << '\n'
-                     << "\nAt IR Inst: " << NToString(&I) << '\n';
-                  for (const auto *Pred : CFG.getPredsOf(&I)) {
-                    OS << "\nPredecessor: " << NToString(Pred) << '\n';
-                    auto PredResults = SR.resultsAt(Pred, true);
-                    for (auto Res : PredResults) {
-                      if (Res.first == Alloca) {
-                        OS << "Pred State: " << LToString(Res.second) << '\n';
-                      }
-                    }
-                  }
-                  OS << "============================\n";
+                  // ERROR STATE DETECTED
+                  this->Printer->onResult(&I, Res.first, TSD->error(),
+                                          TSD->analysisType());
                 }
-              } else {
-                OS << "\nInst: " << NToString(&I) << '\n'
-                   << "Fact: " << DToString(Res.first) << '\n'
-                   << "State: " << LToString(Res.second) << '\n';
               }
             }
           }
         }
       }
-      OS << "\n--------------------------------------------\n";
     }
+
+    this->Printer->onFinalize();
+  }
+
+  [[nodiscard]] bool
+  isInteresting(const llvm::Instruction *Inst) const noexcept {
+    const auto *Call = llvm::dyn_cast<llvm::CallBase>(Inst);
+    if (!Call) {
+      return false;
+    }
+    if (const auto *StaticCallee = Call->getCalledFunction()) {
+      return TSD->isAPIFunction(StaticCallee->getName().str());
+    }
+
+    return true;
   }
 
 private:

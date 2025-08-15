@@ -1,7 +1,28 @@
 # Breaking Changes
 
-## Development HEAD
+## development HEAD
 
+*None*
+
+## v2503
+
+- The `DTAResolver` and the cli option `--call-graph-analysis=dta` do not work anymore (due to opaque pointers) and will be removed for the next release. Please use the `OTF` or `RTA` resolver instead.
+- The default type-hierarchy implementation has been changed from `LLVMTypeHierarchy` to `DIBasedTypeHierarchy`. This also requires all affected analyses to be performed on LLVM IR that contains debug information.
+- Removed the phasar-library `phasar_controller`. It is now part of the tool `phasar-cli`.
+- The API of the `TypeHierarchy` interface (and thus the `LLVMTypeHierarchy` and `DIBasedTypeHierarchy` as well) has changed:
+  - No handling of the super-type relation (only sub-types)
+  - No VTable handling anymore -- has been out-sourced into `LLVMVFTableProvider`
+  - minor API changes
+- The constructors of the call-graph resolvers have changed. They:
+  - take the `LLVMProjectIRDB` as pointer-to-const
+  - take an additional second parameter of type `const LLVMVFTableProvider *`
+  - not necessarily require a `LLVMTypeHierarchy` anymore
+- Some constructors of `LLVMBasedICFG` do not accept a `LLVMTypeHierarchy` pointer anymore
+- Removed IfdsFieldSensTaintAnalysis as it relies on LLVM's deprecated typed-pointers.
+
+## v2403
+
+- Versioning scheme has been changed from `<month><year>` to `<year><month>`
 - Default build mode is no longer `SHARED` but `STATIC`. To build in shared mode, use the cmake option `BUILD_SHARED_LIBS` which we don't recommend anymore. Consider using `PHASAR_BUILD_DYNLIB` instead to build one big libphasar.so.
 - Build type `DebugSan` has been removed in favor of a new CMake option `PHASAR_ENABLE_SANITIZERS` that not only works in `Debug` mode.
 

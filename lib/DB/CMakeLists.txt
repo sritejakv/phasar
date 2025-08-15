@@ -1,12 +1,19 @@
-file(GLOB_RECURSE DB_SRC *.h *.cpp)
+if(SQLite3_FOUND)
+  file(GLOB_RECURSE DB_SRC *.h *.cpp)
 
-add_phasar_library(phasar_db
-  ${DB_SRC}
-  LINKS phasar_passes phasar_utils
-  LLVM_LINK_COMPONENTS Support
-  LINK_PRIVATE ${SQLITE3_LIBRARY}
-)
+  add_phasar_library(phasar_db
+    ${DB_SRC}
 
-target_include_directories(phasar_db
-  PRIVATE ${SQLITE3_INCLUDE_DIR}
-)
+    LINKS phasar_passes
+      phasar_utils
+
+    LLVM_LINK_COMPONENTS
+      Support
+
+    LINK_PRIVATE
+      SQLite::SQLite3
+
+    MODULE_FILES
+      DB.cppm
+  )
+endif()
