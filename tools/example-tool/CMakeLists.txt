@@ -1,3 +1,14 @@
+set(LLVM_LINK_COMPONENTS
+  Analysis
+  BitWriter
+  Core
+  Demangle
+  IRReader
+  Linker
+  Passes
+  Support
+)
+
 # Build a stand-alone executable
 if(PHASAR_IN_TREE)
   # Build a small test tool to show how phasar may be used

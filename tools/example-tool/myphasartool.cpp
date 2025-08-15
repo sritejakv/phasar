@@ -8,6 +8,7 @@
  *****************************************************************************/
 
 #include "phasar.h"
+#include "phasar/Utils/IO.h"
 
 #include <filesystem>
 #include <string>
@@ -17,45 +18,38 @@ using namespace psr;
 int main(int Argc, const char **Argv) {
   using namespace std::string_literals;
 
-  if (Argc < 2 || !std::filesystem::exists(Argv[1]) ||
+  if (Argc < 3 || !std::filesystem::exists(Argv[1]) ||
       std::filesystem::is_directory(Argv[1])) {
     llvm::errs() << "myphasartool\n"
                     "A small PhASAR-based example program\n\n"
-                    "Usage: myphasartool <LLVM IR file>\n";
+                    "Usage: myphasartool <LLVM IR file> <Output folder>\n";
     return 1;
   }
 
-  std::vector EntryPoints = {"main"s};
-
-  HelperAnalyses HA(Argv[1], EntryPoints);
-  if (!HA.getProjectIRDB().isValid()) {
-    return 1;
-  }
-
-  if (const auto *F = HA.getProjectIRDB().getFunctionDefinition("main")) {
-    // print type hierarchy
-    HA.getTypeHierarchy().print();
-    // print points-to information
-    HA.getAliasInfo().print();
-    // print inter-procedural control-flow graph
-    HA.getICFG().print();
-
-    // IFDS template parametrization test
-    llvm::outs() << "Testing IFDS:\n";
-    auto L = createAnalysisProblem<IFDSSolverTest>(HA, EntryPoints);
-    IFDSSolver S(L, &HA.getICFG());
-    auto IFDSResults = S.solve();
-    IFDSResults.dumpResults(HA.getICFG());
-
-    // IDE template parametrization test
-    llvm::outs() << "Testing IDE:\n";
-    auto M = createAnalysisProblem<IDELinearConstantAnalysis>(HA, EntryPoints);
-    // Alternative way of solving an IFDS/IDEProblem:
-    auto IDEResults = solveIDEProblem(M, HA.getICFG());
-    IDEResults.dumpResults(HA.getICFG());
-
+  const std::filesystem::path OutputFolder(Argv[2]);
+  if (!std::filesystem::exists(OutputFolder)) {
+    // Create the directory
+    if (std::filesystem::create_directory(OutputFolder)) {
+        llvm::outs() << "Directory created: " << OutputFolder.string() << "\n";
+    } else {
+        llvm::outs() << "Failed to create directory: " << OutputFolder.string() << "\n";
+    }
   } else {
-    llvm::errs() << "error: file does not contain a 'main' function!\n";
+      llvm::errs() << "Directory already exists: " << OutputFolder.string() << "\n";
+      return 1;
   }
+
+  LLVMProjectIRDB IRDB(Argv[1]);
+
+  const LLVMBasedCFG CFG;
+  for (const auto *Fun: IRDB.getAllFunctions()) {
+    assert(Fun != nullptr && "Invalid function");
+    if (Fun->hasName() && !Fun->isIntrinsic() && !Fun->isDeclaration()) {
+      auto CFGJson = CFG.exportCFGAsSourceCodeJson(Fun);
+      std::string OutputFile(OutputFolder.string() + "/" + Fun->getName().str() + ".json");
+      writeTextFile(OutputFile, CFGJson.dump(2));
+    }
+  }
+
   return 0;
 }
